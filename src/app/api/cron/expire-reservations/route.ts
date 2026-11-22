@@ -118,22 +118,25 @@ async function handleCron(req: Request): Promise<NextResponse> {
     );
   }
 
-  // 1. Busca todas as rifas elegíveis via paginação determinística (sem limite da API)
+  // 1. Busca todas as rifas elegíveis via paginação determinística por cursor (sem limite da API)
   // Inclui 'draft', 'active', 'paused' e 'ended' para cobrir qualquer pedido pendente
   const PAGE_SIZE = 500;
-  let page = 0;
+  let lastSeenId: string | null = null;
   const allRaffles: Array<{ id: string; status: string; slug: string }> = [];
 
   while (true) {
-    const from = page * PAGE_SIZE;
-    const to = from + PAGE_SIZE - 1;
-
-    const { data: pageData, error: pageErr } = await sbAdmin
+    let query = sbAdmin
       .from("raffles")
       .select("id, status, slug")
       .in("status", ["draft", "active", "paused", "ended"])
       .order("id", { ascending: true })
-      .range(from, to);
+      .limit(PAGE_SIZE);
+
+    if (lastSeenId) {
+      query = query.gt("id", lastSeenId);
+    }
+
+    const { data: pageData, error: pageErr } = await query;
 
     // REGRA DE SEGURANÇA: Erro na consulta NUNCA executa limpeza global de fallback
     if (pageErr) {
@@ -152,12 +155,11 @@ async function handleCron(req: Request): Promise<NextResponse> {
     }
 
     allRaffles.push(...pageData);
+    lastSeenId = pageData[pageData.length - 1].id;
 
     if (pageData.length < PAGE_SIZE) {
       break;
     }
-
-    page++;
   }
 
   // 2. Se a consulta for vazia (zero rifas), retorna sucesso limpo sem executar limpeza global

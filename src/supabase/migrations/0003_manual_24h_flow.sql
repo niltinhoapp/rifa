@@ -24,6 +24,50 @@ alter table public.payments add column if not exists confirmed_at timestamptz nu
 alter table public.payments add column if not exists confirmed_by uuid null references auth.users(id);
 alter table public.payments add column if not exists updated_at timestamptz not null default now();
 
+-- 1.1 Proteção declarativa contra duplicidade de pagamentos por pedido
+-- Verificação preventiva: garante que a migration falhe de maneira segura se houver duplicidades
+do $$
+declare
+  v_dup_count int;
+  v_dup_examples text;
+begin
+  select count(*) into v_dup_count
+  from (
+    select order_id
+    from public.payments
+    group by order_id
+    having count(*) > 1
+  ) dups;
+
+  if v_dup_count > 0 then
+    select string_agg(order_id::text || ' (' || c::text || ' pagamentos)', ', ')
+    into v_dup_examples
+    from (
+      select order_id, count(*) as c
+      from public.payments
+      group by order_id
+      having count(*) > 1
+      limit 5
+    ) s;
+
+    raise exception 'MIGRATION ABORTADA: Foram encontrados % pedidos com pagamentos duplicados na tabela public.payments. Exemplos: %. É necessária resolução manual prévia sem exclusão automática.', v_dup_count, v_dup_examples;
+  end if;
+end $$;
+
+-- Adiciona constraint UNIQUE em public.payments(order_id) se ainda não existir
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'uq_payments_order_id'
+      and conrelid = 'public.payments'::regclass
+  ) then
+    alter table public.payments
+      add constraint uq_payments_order_id unique (order_id);
+  end if;
+end $$;
+
 -- Índices para integridade e performance
 create index if not exists idx_orders_workspace_status on public.orders(workspace_id, status);
 create index if not exists idx_orders_raffle_expires on public.orders(raffle_id, status, expires_at);
@@ -383,6 +427,9 @@ grant execute on function public.confirm_order_manual(uuid, uuid) to authenticat
 -- ==============================================================================
 -- 4. RPC: HIGIENIZAÇÃO SEGURA DE RESERVAS EXPIRADAS APÓS 24 HORAS
 -- ==============================================================================
+-- Descarte preventivo da assinatura legada de 1 parâmetro (uuid) para eliminar sobrecarga ambígua
+drop function if exists public.cleanup_expired_reservations_24h(uuid);
+
 create or replace function public.cleanup_expired_reservations_24h(
   p_raffle_id uuid default null,
   p_batch_size int default 200
@@ -401,6 +448,7 @@ declare
   v_orders int := 0;
   v_nums int := 0;
   v_released int;
+  v_scanned int := 0;
   v_has_more boolean := false;
   v_now timestamptz := clock_timestamp();
   v_effective_batch int := coalesce(p_batch_size, 200);
@@ -424,6 +472,8 @@ begin
     for update skip locked
     limit v_effective_batch
   loop
+    v_scanned := v_scanned + 1;
+
     -- Proteção Financeira Absoluta: NUNCA expira se houver pagamento confirmado
     if not exists (
       select 1 from public.payments
@@ -452,14 +502,19 @@ begin
     end if;
   end loop;
 
-  -- Avalia se ainda restam pedidos expirados não processados neste lote
-  if v_orders >= v_effective_batch then
+  -- Avalia se ainda restam pedidos expirados não processados
+  -- Utiliza a quantidade de registros examinados (v_scanned) para não ser afetado por pedidos com pagamento confirmado
+  if v_scanned >= v_effective_batch then
     select exists (
       select 1
-      from public.orders
-      where status = 'pending'
-        and expires_at <= v_now
-        and (p_raffle_id is null or raffle_id = p_raffle_id)
+      from public.orders o
+      where o.status = 'pending'
+        and o.expires_at <= v_now
+        and (p_raffle_id is null or o.raffle_id = p_raffle_id)
+        and not exists (
+          select 1 from public.payments p
+          where p.order_id = o.id and p.status = 'confirmed'
+        )
     ) into v_has_more;
   end if;
 

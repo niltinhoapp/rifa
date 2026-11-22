@@ -78,6 +78,26 @@ class Manual24hPostgresEngine {
     this.virtualClock = new Date(this.virtualClock.getTime() + hours * 3600 * 1000);
   }
 
+  addPayment(orderId, paymentData = {}) {
+    if (this.payments.some((p) => p.order_id === orderId)) {
+      throw new Error('duplicate key value violates unique constraint "uq_payments_order_id"');
+    }
+    const pay = {
+      id: `pay-${orderId}`,
+      order_id: orderId,
+      method: "pix_manual",
+      status: "pending",
+      amount_cents: 0,
+      paid_at: null,
+      created_at: this.getClock().toISOString(),
+      confirmed_at: null,
+      confirmed_by: null,
+      ...paymentData,
+    };
+    this.payments.push(pay);
+    return pay;
+  }
+
   // Simulação fiel da RPC reserve_numbers_manual_24h
   async reserve_numbers_manual_24h(slug, buyer_name, buyer_phone, numbers) {
     const cleanName = (buyer_name || "").trim();
@@ -173,16 +193,8 @@ class Manual24hPostgresEngine {
         rn.buyer_phone = cleanPhone;
       }
 
-      this.payments.push({
-        id: `pay-${orderId}`,
-        order_id: orderId,
-        method: "pix_manual",
-        status: "pending",
+      this.addPayment(orderId, {
         amount_cents: totalCents,
-        paid_at: null,
-        created_at: now.toISOString(),
-        confirmed_at: null,
-        confirmed_by: null,
       });
 
       return {
@@ -344,7 +356,7 @@ class Manual24hPostgresEngine {
     };
   }
 
-  // ETAPA 6: Simulação de Higienização com Lote e Sinalização has_more
+  // ETAPA 6: Simulação de Higienização com Lote e Sinalização has_more baseada em tuplas examinadas
   async cleanup_expired_reservations_24h(raffle_id = null, batch_size = 200, caller_role = "service_role") {
     if (caller_role !== "service_role") {
       throw new Error("Acesso restrito ao backend administrativo (service_role)");
@@ -353,6 +365,7 @@ class Manual24hPostgresEngine {
     const now = this.getClock();
     let ordersExpired = 0;
     let numbersReleased = 0;
+    let scanned = 0;
 
     const allExpired = this.orders.filter(
       (o) =>
@@ -361,10 +374,11 @@ class Manual24hPostgresEngine {
         (!raffle_id || o.raffle_id === raffle_id)
     );
 
-    // Processa até batch_size
+    // Processa até batch_size tuplas examinadas
     const batch = allExpired.slice(0, batch_size);
 
     for (const order of batch) {
+      scanned++;
       const hasConfirmedPayment = this.payments.some(
         (p) => p.order_id === order.id && p.status === "confirmed"
       );
@@ -388,18 +402,30 @@ class Manual24hPostgresEngine {
       }
     }
 
-    const hasMore = allExpired.length > batch_size;
+    // Avalia se ainda restam pedidos expirados não processados
+    // Utiliza scanned para não ser distorcido por pedidos com pagamento confirmado
+    let hasMore = false;
+    if (scanned >= batch_size) {
+      hasMore = this.orders.some(
+        (o) =>
+          o.status === "pending" &&
+          new Date(o.expires_at) <= now &&
+          (!raffle_id || o.raffle_id === raffle_id) &&
+          !this.payments.some((p) => p.order_id === o.id && p.status === "confirmed")
+      );
+    }
+
     return { orders_expired: ordersExpired, numbers_released: numbersReleased, has_more: hasMore };
   }
 }
 
 /**
  * ==============================================================================
- * GRUPO 1: MATRIZ DOS 18 TESTES OBRIGATÓRIOS DA AUDITORIA DE SEGURANÇA
+ * GRUPO 1: MATRIZ DOS 21 TESTES DA AUDITORIA DE SEGURANÇA E HARDENING
  * (Simulação em memória das regras relacionais e de concorrência)
  * ==============================================================================
  */
-describe("GRUPO 1: REGRAS RELACIONAIS, BLOQUEIOS E SEGURANÇA DE RESERVAS (18 CENÁRIOS)", () => {
+describe("GRUPO 1: REGRAS RELACIONAIS, BLOQUEIOS E SEGURANÇA DE RESERVAS (21 CENÁRIOS)", () => {
   const engine = new Manual24hPostgresEngine();
 
   // Teste 1: Confirmação com bloqueio válido das cotas
@@ -593,26 +619,26 @@ describe("GRUPO 1: REGRAS RELACIONAIS, BLOQUEIOS E SEGURANÇA DE RESERVAS (18 CE
     assert.equal(n101.status, "reserved");
   });
 
-  // Teste 12: Consulta de rifas com paginação
-  test("12. Consulta de rifas elegíveis com paginação (sem limite da API)", async () => {
+  // Teste 12: Consulta de rifas com paginação determinística por cursor
+  test("12. Consulta de rifas elegíveis com paginação por cursor (sem limite da API)", async () => {
     // Simula catálogo com mais itens que a página
     const mockDb = [];
     for (let i = 1; i <= 12; i++) {
-      mockDb.push({ id: `raf-${i}`, status: i % 2 === 0 ? "active" : "draft", slug: `rifa-${i}` });
+      mockDb.push({ id: `raf-${String(i).padStart(3, "0")}`, status: i % 2 === 0 ? "active" : "draft", slug: `rifa-${i}` });
     }
+    mockDb.sort((a, b) => a.id.localeCompare(b.id));
 
     const PAGE_SIZE = 5;
-    let page = 0;
+    let lastSeenId = null;
     const collected = [];
 
     while (true) {
-      const from = page * PAGE_SIZE;
-      const to = from + PAGE_SIZE;
-      const chunk = mockDb.slice(from, to);
+      let chunk = mockDb.filter((r) => !lastSeenId || r.id > lastSeenId);
+      chunk = chunk.slice(0, PAGE_SIZE);
       if (chunk.length === 0) break;
       collected.push(...chunk);
+      lastSeenId = chunk[chunk.length - 1].id;
       if (chunk.length < PAGE_SIZE) break;
-      page++;
     }
 
     assert.equal(collected.length, 12);
@@ -779,6 +805,100 @@ describe("GRUPO 1: REGRAS RELACIONAIS, BLOQUEIOS E SEGURANÇA DE RESERVAS (18 CE
     assert.equal(response.ok, false);
     assert.equal(response.status, 500);
     assert.equal(response.failed_raffles[0].slug, "rifa-com-erro");
+  });
+
+  // Teste 19: has_more com pedidos que possuem pagamento confirmado no lote
+  test("19. has_more com pedidos com pagamento confirmado no lote: não produz falso negativo", async () => {
+    engine.reset();
+    const now = engine.getClock();
+
+    // Cria 250 pedidos com prazo vencido na rifa
+    // Nos primeiros 200 pedidos examinados, 15 possuem pagamentos confirmados
+    for (let i = 1; i <= 250; i++) {
+      const ordId = `ord-hasmore-${i}`;
+      engine.orders.push({
+        id: ordId,
+        workspace_id: "ws-acai-1",
+        raffle_id: "raf-moto-500",
+        status: "pending",
+        expires_at: new Date(now.getTime() - 1000).toISOString(),
+      });
+
+      const isConfirmed = i <= 15;
+      engine.payments.push({
+        id: `pay-hasmore-${i}`,
+        order_id: ordId,
+        method: "pix_manual",
+        status: isConfirmed ? "confirmed" : "pending",
+        created_at: now.toISOString(),
+      });
+    }
+
+    // Executa lote de 200 pedidos
+    const r = await engine.cleanup_expired_reservations_24h("raf-moto-500", 200, "service_role");
+
+    // 200 tuplas examinadas: 15 ignoradas (pagamento confirmado) + 185 expiradas
+    assert.equal(r.orders_expired, 185, "Deve expirar apenas os pedidos sem pagamento confirmado");
+    // CRÍTICO: has_more DEVE ser true porque restam 50 pedidos além do lote de 200 examinados
+    assert.equal(r.has_more, true, "has_more DEVE ser true mesmo com pedidos ignorados no lote");
+
+    // Segunda execução: processa os 50 restantes
+    const r2 = await engine.cleanup_expired_reservations_24h("raf-moto-500", 200, "service_role");
+    assert.equal(r2.orders_expired, 50, "Deve expirar os 50 restantes");
+    assert.equal(r2.has_more, false, "Agora has_more deve ser false pois não restam pedidos");
+  });
+
+  // Teste 20: Integridade declarativa de pagamentos (UNIQUE order_id)
+  test("20. Integridade declarativa de pagamentos: rejeita inserção de pagamentos duplicados para o mesmo pedido", async () => {
+    engine.reset();
+    const res = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Maria", "11977778888", [10]);
+    assert.ok(res.order_id);
+
+    // Tenta inserir um segundo pagamento para o mesmo order_id
+    assert.throws(
+      () => {
+        engine.addPayment(res.order_id, { method: "pix_manual", status: "pending" });
+      },
+      /duplicate key value violates unique constraint "uq_payments_order_id"/,
+      "Deve lançar erro de violação de chave única ao duplicar pagamento para o mesmo pedido"
+    );
+  });
+
+  // Teste 21: Paginação por cursor no cron é imune a desvio de offset sob inserção concorrente
+  test("21. Paginação por cursor no cron: imune a desvio de offset sob inserções concorrentes", async () => {
+    const mockDb = [
+      { id: "raf-001", status: "active", slug: "rifa-1" },
+      { id: "raf-002", status: "active", slug: "rifa-2" },
+      { id: "raf-003", status: "active", slug: "rifa-3" },
+      { id: "raf-005", status: "active", slug: "rifa-5" },
+    ];
+
+    const PAGE_SIZE = 2;
+    let lastSeenId = null;
+    const collected = [];
+
+    // Página 1 (raf-001, raf-002)
+    let p1 = mockDb.filter((r) => !lastSeenId || r.id > lastSeenId).slice(0, PAGE_SIZE);
+    collected.push(...p1);
+    lastSeenId = p1[p1.length - 1].id;
+
+    // Simula inserção concorrente de 'raf-001b' e 'raf-004' antes da página 2
+    mockDb.push({ id: "raf-001b", status: "active", slug: "rifa-1b" });
+    mockDb.push({ id: "raf-004", status: "active", slug: "rifa-4" });
+    mockDb.sort((a, b) => a.id.localeCompare(b.id));
+
+    // Página 2 (continua estritamente após raf-002: pegará raf-003 e raf-004)
+    let p2 = mockDb.filter((r) => !lastSeenId || r.id > lastSeenId).slice(0, PAGE_SIZE);
+    collected.push(...p2);
+    lastSeenId = p2[p2.length - 1].id;
+
+    // Página 3 (pegará raf-005)
+    let p3 = mockDb.filter((r) => !lastSeenId || r.id > lastSeenId).slice(0, PAGE_SIZE);
+    collected.push(...p3);
+    lastSeenId = p3[p3.length - 1].id;
+
+    assert.equal(collected.length, 5);
+    assert.deepEqual(collected.map((r) => r.id), ["raf-001", "raf-002", "raf-003", "raf-004", "raf-005"]);
   });
 });
 
