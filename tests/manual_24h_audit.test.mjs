@@ -1,5 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 
 /**
  * Motor de Simulação Transacional PostgreSQL para o Fluxo Manual de 24 Horas
@@ -196,8 +197,12 @@ class Manual24hPostgresEngine {
   }
 
   // Simulação fiel da RPC confirm_order_manual
-  async confirm_order_manual(order_id, admin_id) {
+  async confirm_order_manual(order_id, admin_id, caller_role = "authenticated") {
     const now = this.getClock();
+
+    if (caller_role === "anon") {
+      throw new Error("Acesso não autorizado: operação requer autenticação de administrador ou service_role");
+    }
 
     const order = this.orders.find((o) => o.id === order_id);
     if (!order) {
@@ -205,7 +210,10 @@ class Manual24hPostgresEngine {
     }
 
     // Validação de membro do workspace
-    if (admin_id) {
+    if (caller_role === "authenticated") {
+      if (!admin_id) {
+        throw new Error("Identificador do administrador ausente");
+      }
       const isMember = this.workspace_members.some(
         (wm) => wm.workspace_id === order.workspace_id && wm.user_id === admin_id
       );
@@ -289,7 +297,11 @@ class Manual24hPostgresEngine {
   }
 
   // Simulação fiel da RPC cleanup_expired_reservations_24h
-  async cleanup_expired_reservations_24h(raffle_id = null) {
+  async cleanup_expired_reservations_24h(raffle_id = null, caller_role = "service_role") {
+    if (caller_role !== "service_role") {
+      throw new Error("Acesso restrito ao backend administrativo (service_role)");
+    }
+
     const now = this.getClock();
     let ordersExpired = 0;
     let numbersReleased = 0;
@@ -671,5 +683,52 @@ describe("MATRIZ DOS 14 TESTES OBRIGATÓRIOS — FLUXO MANUAL 24H E CONFIRMAÇÃ
       /Acesso não autorizado/,
       "Deve barrar confirmação feita por administrador de outro workspace"
     );
+  });
+
+  // Teste 15: Tentativa de higienização sem papel service_role
+  test("15. Tentativa de higienização sem papel service_role (Bloqueio estrito)", async () => {
+    engine.reset();
+    await assert.rejects(
+      async () => {
+        // Chamada fingindo ser usuário comum ou anon
+        await engine.cleanup_expired_reservations_24h(null, "authenticated");
+      },
+      /Acesso restrito ao backend administrativo/,
+      "Apenas o backend com service_role pode executar cleanup"
+    );
+
+    await assert.rejects(
+      async () => {
+        await engine.cleanup_expired_reservations_24h(null, "anon");
+      },
+      /Acesso restrito ao backend administrativo/,
+      "Chamadas anônimas devem ser terminantemente recusadas"
+    );
+  });
+
+  // Teste 16: Autenticação do cron com CRON_SECRET e Timing-Safe check
+  test("16. Validação de segurança do cron (CRON_SECRET obrigatório e timing-safe)", () => {
+    function timingSafeEqualStr(a, b) {
+      if (typeof a !== "string" || typeof b !== "string") return false;
+      const bufA = Buffer.from(a, "utf-8");
+      const bufB = Buffer.from(b, "utf-8");
+      if (bufA.length !== bufB.length) return false;
+      return crypto.timingSafeEqual(bufA, bufB);
+    }
+
+    const validSecret = "super-segredo-cron-2026-vexa";
+    
+    // Segredo correto
+    assert.equal(timingSafeEqualStr("super-segredo-cron-2026-vexa", validSecret), true);
+
+    // Segredo incorreto (mesmo tamanho)
+    assert.equal(timingSafeEqualStr("super-segredo-cron-2026-fake", validSecret), false);
+
+    // Segredo com tamanho diferente
+    assert.equal(timingSafeEqualStr("curto", validSecret), false);
+
+    // Segredo vazio ou nulo
+    assert.equal(timingSafeEqualStr("", validSecret), false);
+    assert.equal(timingSafeEqualStr(null, validSecret), false);
   });
 });

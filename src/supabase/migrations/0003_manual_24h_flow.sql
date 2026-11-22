@@ -218,9 +218,6 @@ declare
   v_locked_count int;
   v_now timestamptz := clock_timestamp();
 begin
-  -- Identifica o autor da confirmação (prioriza auth.uid() do Supabase)
-  v_confirmed_by := coalesce(auth.uid(), p_admin_id);
-
   -- 1. Trava o pedido com FOR UPDATE
   select * into v_order
   from public.orders
@@ -231,9 +228,21 @@ begin
     raise exception 'Pedido não encontrado: %', p_order_id;
   end if;
 
-  -- 2. Validação estrita de autorização no workspace (se chamado por usuário logado)
-  if auth.uid() is not null and not public.is_workspace_member(v_order.workspace_id) then
-    raise exception 'Acesso não autorizado: usuário não pertence ao workspace desta rifa';
+  -- 2. Validação estrita de autorização e identidade administrativa
+  if auth.uid() is not null then
+    -- Chamada autenticada via Supabase Auth: identidade é estritamente vinculada a auth.uid()
+    -- Impede qualquer falsificação de identidade por meio de p_admin_id
+    v_confirmed_by := auth.uid();
+
+    if not public.is_workspace_member(v_order.workspace_id) then
+      raise exception 'Acesso não autorizado: usuário não pertence ao workspace desta rifa';
+    end if;
+  else
+    -- Chamada sem auth.uid(): restrita exclusivamente ao backend com papel service_role
+    if current_setting('request.jwt.claim.role', true) <> 'service_role' and current_user <> 'service_role' then
+      raise exception 'Acesso não autorizado: operação requer autenticação de administrador ou service_role';
+    end if;
+    v_confirmed_by := p_admin_id;
   end if;
 
   -- 3. Idempotência estrita: se já confirmado, retorna sem duplicar
@@ -317,6 +326,7 @@ end;
 $$;
 
 revoke all on function public.confirm_order_manual(uuid, uuid) from public;
+revoke all on function public.confirm_order_manual(uuid, uuid) from anon;
 grant execute on function public.confirm_order_manual(uuid, uuid) to authenticated, service_role;
 
 -- ==============================================================================
@@ -340,6 +350,11 @@ declare
   v_released int;
   v_now timestamptz := clock_timestamp();
 begin
+  -- Exclusividade de Execução: apenas o backend administrativo (service_role) pode rodar a higienização
+  if current_setting('request.jwt.claim.role', true) <> 'service_role' and current_user <> 'service_role' then
+    raise exception 'Acesso restrito ao backend administrativo (service_role)';
+  end if;
+
   for v_rec in
     select id, raffle_id, expires_at
     from public.orders
@@ -383,4 +398,5 @@ end;
 $$;
 
 revoke all on function public.cleanup_expired_reservations_24h(uuid) from public;
-grant execute on function public.cleanup_expired_reservations_24h(uuid) to authenticated, service_role;
+revoke all on function public.cleanup_expired_reservations_24h(uuid) from anon, authenticated;
+grant execute on function public.cleanup_expired_reservations_24h(uuid) to service_role;
