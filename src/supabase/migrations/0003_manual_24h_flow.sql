@@ -463,13 +463,19 @@ begin
   end if;
 
   for v_rec in
-    select id, raffle_id, expires_at
-    from public.orders
-    where status = 'pending'
-      and expires_at <= v_now
-      and (p_raffle_id is null or raffle_id = p_raffle_id)
-    order by expires_at asc
-    for update skip locked
+    select o.id, o.raffle_id, o.expires_at
+    from public.orders o
+    where o.status = 'pending'
+      and o.expires_at <= v_now
+      and (p_raffle_id is null or o.raffle_id = p_raffle_id)
+      and not exists (
+        select 1
+        from public.payments p
+        where p.order_id = o.id
+          and p.status = 'confirmed'
+      )
+    order by o.expires_at asc
+    for update of o skip locked
     limit v_effective_batch
   loop
     v_scanned := v_scanned + 1;

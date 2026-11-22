@@ -356,7 +356,7 @@ class Manual24hPostgresEngine {
     };
   }
 
-  // ETAPA 6: Simulação de Higienização com Lote e Sinalização has_more baseada em tuplas examinadas
+  // ETAPA 6: Simulação de Higienização com Lote e Filtro de Pagamentos Confirmados na Consulta Principal
   async cleanup_expired_reservations_24h(raffle_id = null, batch_size = 200, caller_role = "service_role") {
     if (caller_role !== "service_role") {
       throw new Error("Acesso restrito ao backend administrativo (service_role)");
@@ -367,18 +367,21 @@ class Manual24hPostgresEngine {
     let numbersReleased = 0;
     let scanned = 0;
 
+    // Consulta principal: exclui diretamente da seleção pedidos que já possuam pagamento confirmado (prevenção de starvation)
     const allExpired = this.orders.filter(
       (o) =>
         o.status === "pending" &&
         new Date(o.expires_at) <= now &&
-        (!raffle_id || o.raffle_id === raffle_id)
+        (!raffle_id || o.raffle_id === raffle_id) &&
+        !this.payments.some((p) => p.order_id === o.id && p.status === "confirmed")
     );
 
-    // Processa até batch_size tuplas examinadas
+    // Processa até batch_size tuplas da consulta elegível
     const batch = allExpired.slice(0, batch_size);
 
     for (const order of batch) {
       scanned++;
+      // Proteção de defesa em profundidade
       const hasConfirmedPayment = this.payments.some(
         (p) => p.order_id === order.id && p.status === "confirmed"
       );
@@ -402,8 +405,7 @@ class Manual24hPostgresEngine {
       }
     }
 
-    // Avalia se ainda restam pedidos expirados não processados
-    // Utiliza scanned para não ser distorcido por pedidos com pagamento confirmado
+    // has_more utiliza exatamente os mesmos critérios de elegibilidade da consulta principal
     let hasMore = false;
     if (scanned >= batch_size) {
       hasMore = this.orders.some(
@@ -807,15 +809,37 @@ describe("GRUPO 1: REGRAS RELACIONAIS, BLOQUEIOS E SEGURANÇA DE RESERVAS (21 CE
     assert.equal(response.failed_raffles[0].slug, "rifa-com-erro");
   });
 
-  // Teste 19: has_more com pedidos que possuem pagamento confirmado no lote
-  test("19. has_more com pedidos com pagamento confirmado no lote: não produz falso negativo", async () => {
+  // Teste 19: Prevenção de Starvation e preservação de pagamentos confirmados
+  test("19. Prevenção de Starvation: pedidos com pagamento confirmado não bloqueiam lotes e não são alterados", async () => {
     engine.reset();
     const now = engine.getClock();
 
-    // Cria 250 pedidos com prazo vencido na rifa
-    // Nos primeiros 200 pedidos examinados, 15 possuem pagamentos confirmados
+    // 1. Pelo menos 15 pedidos iniciais com prazo vencido e pagamento confirmado
+    const confirmedOrderIds = [];
+    for (let i = 1; i <= 15; i++) {
+      const ordId = `ord-confirmed-${i}`;
+      confirmedOrderIds.push(ordId);
+      engine.orders.push({
+        id: ordId,
+        workspace_id: "ws-acai-1",
+        raffle_id: "raf-moto-500",
+        status: "pending",
+        expires_at: new Date(now.getTime() - 2000).toISOString(),
+      });
+      engine.payments.push({
+        id: `pay-confirmed-${i}`,
+        order_id: ordId,
+        method: "pix_manual",
+        status: "confirmed",
+        created_at: now.toISOString(),
+      });
+    }
+
+    // 2. Pelo menos 250 pedidos adicionais com prazo vencido e sem pagamento confirmado
+    const unpaidOrderIds = [];
     for (let i = 1; i <= 250; i++) {
-      const ordId = `ord-hasmore-${i}`;
+      const ordId = `ord-unpaid-${i}`;
+      unpaidOrderIds.push(ordId);
       engine.orders.push({
         id: ordId,
         workspace_id: "ws-acai-1",
@@ -823,29 +847,45 @@ describe("GRUPO 1: REGRAS RELACIONAIS, BLOQUEIOS E SEGURANÇA DE RESERVAS (21 CE
         status: "pending",
         expires_at: new Date(now.getTime() - 1000).toISOString(),
       });
-
-      const isConfirmed = i <= 15;
       engine.payments.push({
-        id: `pay-hasmore-${i}`,
+        id: `pay-unpaid-${i}`,
         order_id: ordId,
         method: "pix_manual",
-        status: isConfirmed ? "confirmed" : "pending",
+        status: "pending",
         created_at: now.toISOString(),
       });
     }
 
-    // Executa lote de 200 pedidos
-    const r = await engine.cleanup_expired_reservations_24h("raf-moto-500", 200, "service_role");
+    // LOTE 1 (batch_size = 200)
+    // Como os 15 confirmados são filtrados diretamente na consulta, o lote é 100% preenchido com 200 pedidos elegíveis
+    const lote1 = await engine.cleanup_expired_reservations_24h("raf-moto-500", 200, "service_role");
+    assert.equal(lote1.orders_expired, 200, "Lote 1 deve processar 200 pedidos elegíveis sem sofrer starvation");
+    assert.equal(lote1.has_more, true, "Lote 1 deve sinalizar has_more = true pois ainda restam 50 pedidos");
 
-    // 200 tuplas examinadas: 15 ignoradas (pagamento confirmado) + 185 expiradas
-    assert.equal(r.orders_expired, 185, "Deve expirar apenas os pedidos sem pagamento confirmado");
-    // CRÍTICO: has_more DEVE ser true porque restam 50 pedidos além do lote de 200 examinados
-    assert.equal(r.has_more, true, "has_more DEVE ser true mesmo com pedidos ignorados no lote");
+    // LOTE 2 (batch_size = 200)
+    // Processa os 50 pedidos elegíveis restantes
+    const lote2 = await engine.cleanup_expired_reservations_24h("raf-moto-500", 200, "service_role");
+    assert.equal(lote2.orders_expired, 50, "Lote 2 deve processar os 50 pedidos elegíveis restantes");
+    assert.equal(lote2.has_more, false, "Lote 2 deve sinalizar has_more = false pois todos os 250 elegíveis foram processados");
 
-    // Segunda execução: processa os 50 restantes
-    const r2 = await engine.cleanup_expired_reservations_24h("raf-moto-500", 200, "service_role");
-    assert.equal(r2.orders_expired, 50, "Deve expirar os 50 restantes");
-    assert.equal(r2.has_more, false, "Agora has_more deve ser false pois não restam pedidos");
+    // LOTE 3 (Idempotência)
+    const lote3 = await engine.cleanup_expired_reservations_24h("raf-moto-500", 200, "service_role");
+    assert.equal(lote3.orders_expired, 0, "Lote 3 não deve expirar nenhum pedido");
+    assert.equal(lote3.has_more, false, "Lote 3 deve retornar has_more = false");
+
+    // Validação de integridade dos 15 pedidos protegidos: NENHUM deve ter sido alterado
+    for (const confId of confirmedOrderIds) {
+      const ord = engine.orders.find((o) => o.id === confId);
+      const pay = engine.payments.find((p) => p.order_id === confId);
+      assert.equal(ord.status, "pending", "Pedido com pagamento confirmado não pode ter status alterado para expired");
+      assert.equal(pay.status, "confirmed", "Pagamento confirmado deve permanecer intacto");
+    }
+
+    // Validação dos 250 pedidos não pagos: TODOS devem estar com status 'expired'
+    for (const unpId of unpaidOrderIds) {
+      const ord = engine.orders.find((o) => o.id === unpId);
+      assert.equal(ord.status, "expired", "Todos os 250 pedidos elegíveis devem ter transitado para expired");
+    }
   });
 
   // Teste 20: Integridade declarativa de pagamentos (UNIQUE order_id)
