@@ -89,7 +89,7 @@ export async function POST(req: Request, { params }: Ctx) {
   const { error } = await sb
     .from("raffle_numbers")
     .update({
-      status: "confirmed",
+      status: "paid",
       confirmed_at: new Date().toISOString(),
       buyer_name,
       buyer_phone,

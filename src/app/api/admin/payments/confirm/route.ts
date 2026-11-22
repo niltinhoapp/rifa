@@ -5,40 +5,48 @@ export const runtime = "nodejs";
 
 export async function POST(req: Request) {
   const sb = await supabaseSSR();
-  const { data: auth } = await sb.auth.getUser();
-  if (!auth.user) return NextResponse.json({ ok: false, message: "Não autenticado" }, { status: 401 });
+
+  // 1) Validação de autenticação de administrador
+  const { data: auth, error: authErr } = await sb.auth.getUser();
+  if (authErr || !auth?.user) {
+    return NextResponse.json(
+      { ok: false, message: "Não autenticado" },
+      { status: 401 }
+    );
+  }
 
   const body = await req.json().catch(() => null);
   const paymentId = body?.payment_id;
-  if (!paymentId) return NextResponse.json({ ok: false, message: "payment_id ausente" }, { status: 400 });
 
-  // 1) pega payment + order + raffle_id
-  const { data: pay, error: pErr } = await sb
-    .from("payments")
-    .select("id,status,order_id, orders:order_id(id,status,raffle_id,workspace_id)")
-    .eq("id", paymentId)
-    .single();
+  if (!paymentId || typeof paymentId !== "string") {
+    return NextResponse.json(
+      { ok: false, message: "payment_id ausente ou inválido" },
+      { status: 400 }
+    );
+  }
 
-  if (pErr || !pay) return NextResponse.json({ ok: false, message: pErr?.message ?? "Pagamento não encontrado" }, { status: 404 });
+  // 2) Execução Transacional Atômica via RPC no PostgreSQL
+  // Corrige inconsistência de enums (payment_status: 'confirmed', order_status: 'paid', number_status: 'paid')
+  // Garante idempotência e bloqueio FOR UPDATE evitando confirmação de números já liberados ou de outro pedido
+  const { data: rpcRows, error: rpcErr } = await sb.rpc("confirm_payment_atomic", {
+    p_payment_id: paymentId,
+    p_confirmed_by: auth.user.id,
+  });
 
-  const order = (pay as any).orders;
-  if (!order?.id) return NextResponse.json({ ok: false, message: "Pedido inválido" }, { status: 400 });
+  if (rpcErr) {
+    return NextResponse.json(
+      { ok: false, message: rpcErr.message },
+      { status: 400 }
+    );
+  }
 
-  // 2) marca payment como paid
-  const { error: upPayErr } = await sb.from("payments").update({ status: "paid" }).eq("id", paymentId);
-  if (upPayErr) return NextResponse.json({ ok: false, message: upPayErr.message }, { status: 400 });
+  const result = Array.isArray(rpcRows) ? rpcRows[0] : rpcRows;
 
-  // 3) marca order como paid
-  const { error: upOrdErr } = await sb.from("orders").update({ status: "paid" }).eq("id", order.id);
-  if (upOrdErr) return NextResponse.json({ ok: false, message: upOrdErr.message }, { status: 400 });
-
-  // 4) marca todos os números desse order como paid
-  const { error: upNumsErr } = await sb
-    .from("raffle_numbers")
-    .update({ status: "paid", confirmed_at: new Date().toISOString() })
-    .eq("order_id", order.id);
-
-  if (upNumsErr) return NextResponse.json({ ok: false, message: upNumsErr.message }, { status: 400 });
-
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+    order_id: result?.order_id,
+    payment_id: result?.payment_id,
+    numbers_confirmed: result?.numbers_confirmed ?? 0,
+    already_confirmed: Boolean(result?.already_confirmed),
+  });
 }

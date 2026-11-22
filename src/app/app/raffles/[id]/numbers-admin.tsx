@@ -111,7 +111,7 @@ export default function NumbersAdmin({ raffleId }: { raffleId: string }) {
     let free = 0, reserved = 0, confirmed = 0, expired = 0;
     for (const n of numbers) {
       const st = (n.status ?? "free");
-      if (st === "confirmed") confirmed++;
+      if (st === "confirmed" || st === "paid") confirmed++;
       else if (st === "reserved") {
         if (isLocked(n.locked_until)) reserved++;
         else expired++;
@@ -123,7 +123,13 @@ export default function NumbersAdmin({ raffleId }: { raffleId: string }) {
   const filtered = useMemo(() => {
     let arr = numbers;
 
-    if (filter !== "all") arr = arr.filter((n) => (n.status ?? "free") === filter);
+    if (filter !== "all") {
+      arr = arr.filter((n) => {
+        const s = n.status ?? "free";
+        if (filter === "confirmed") return s === "confirmed" || s === "paid";
+        return s === filter;
+      });
+    }
 
     const qq = q.trim();
     if (qq) {
@@ -269,8 +275,9 @@ export default function NumbersAdmin({ raffleId }: { raffleId: string }) {
           const base =
             "rounded-xl border px-2 py-2 text-center text-sm font-semibold select-none cursor-pointer";
 
+          const isConfirmed = st === "confirmed" || st === "paid";
           const cls =
-            st === "confirmed"
+            isConfirmed
               ? "border-emerald-700/50 bg-emerald-950/40 hover:bg-emerald-950/55"
               : st === "reserved"
               ? locked
@@ -279,7 +286,7 @@ export default function NumbersAdmin({ raffleId }: { raffleId: string }) {
               : "border-zinc-800 bg-zinc-950/30 hover:bg-white/10";
 
           let title = "Livre";
-          if (st === "confirmed") title = `Confirmado • ${n.buyer_name ?? ""}`.trim();
+          if (isConfirmed) title = `Confirmado • ${n.buyer_name ?? ""}`.trim();
           if (st === "reserved") {
             if (locked) {
               const left = n.locked_until ? new Date(n.locked_until).getTime() - Date.now() : 0;
