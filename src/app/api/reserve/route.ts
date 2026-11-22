@@ -35,10 +35,9 @@ export async function POST(req: Request) {
   // Remove duplicados de forma determinística
   const uniqueNumbers = Array.from(new Set(numbers));
 
-  // 1) Execução Transacional Atômica via RPC no PostgreSQL
-  // Garante bloqueio exclusivo por linha (SELECT ... FOR UPDATE)
-  // e atomicidade absoluta (all-or-nothing rollback se qualquer cota falhar)
-  const { data: rpcRows, error: rpcErr } = await sb.rpc("reserve_numbers_atomic", {
+  // 1) Chamada Transacional à RPC de Reserva com Validade Estrita de 24 Horas
+  // Bloqueio de linha FOR UPDATE determinístico no PostgreSQL
+  const { data: rpcRows, error: rpcErr } = await sb.rpc("reserve_numbers_manual_24h", {
     p_raffle_slug: slug,
     p_buyer_name: name,
     p_buyer_phone: phone,
@@ -63,15 +62,15 @@ export async function POST(req: Request) {
 
   if (!reservation?.order_id) {
     return NextResponse.json(
-      { ok: false, message: "Falha inesperada ao processar reserva atômica" },
+      { ok: false, message: "Falha inesperada ao processar reserva" },
       { status: 500 }
     );
   }
 
-  // Busca instruções complementares de pagamento para o checkout
+  // Busca instruções complementares de pagamento manual da rifa
   const { data: raffleMeta } = await sb
     .from("raffles")
-    .select("payment_instructions")
+    .select("payment_instructions, payment_mode")
     .eq("slug", slug)
     .single();
 
@@ -80,12 +79,10 @@ export async function POST(req: Request) {
     order: {
       id: reservation.order_id,
       public_token: reservation.public_token,
+      reserved_at: reservation.reserved_at,
       expires_at: reservation.expires_at,
       total_cents: reservation.total_cents,
-    },
-    payment: {
-      id: reservation.payment_id,
-      status: reservation.payment_status ?? "pending",
+      numbers: uniqueNumbers,
     },
     payment_instructions: raffleMeta?.payment_instructions ?? null,
   });

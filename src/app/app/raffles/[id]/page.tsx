@@ -6,6 +6,7 @@ import { supabaseServer } from "@/lib/supabase/server";
 // ⚠️ ajuste os imports abaixo conforme seu caminho real:
 import RaffleEditForm from "./raffle-edit-form";
 import NumbersAdmin from "./numbers-admin";
+import OrdersAdmin from "./orders-admin";
 
 type PageProps = {
   params: Promise<{ id: string }>;
@@ -87,7 +88,10 @@ export default async function RaffleAdminPage({ params }: PageProps) {
         {/* ✅ edição da rifa */}
         <RaffleEditForm raffle={raffle as any} />
 
-        {/* ✅ números + confirmar pagamento */}
+        {/* ✅ Gestão de Pedidos e Confirmação Manual de Pagamentos */}
+        <OrdersAdmin raffleId={raffle.id} />
+
+        {/* ✅ Grade visual de números */}
         <NumbersAdmin raffleId={raffle.id} />
       </div>
     </main>

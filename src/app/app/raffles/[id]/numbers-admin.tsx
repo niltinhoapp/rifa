@@ -21,9 +21,9 @@ type RaffleMeta = {
   draw_date: string | null;
 };
 
-function padNumber(n: number, total: number) {
-  // para 01–100: 1..99 => 2 dígitos; 100 => "100"
-  if (total >= 100 && n === 100) return "100";
+function padNumber(n: number, total: number = 500) {
+  if (total >= 1000) return String(n).padStart(4, "0");
+  if (total >= 100) return String(n).padStart(3, "0");
   return String(n).padStart(2, "0");
 }
 
@@ -191,7 +191,7 @@ export default function NumbersAdmin({ raffleId }: { raffleId: string }) {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <div className="text-lg font-semibold">
-            Números ({total >= 100 ? "01–100" : `01–${total}`})
+            Números ({total >= 100 ? `001–${padNumber(total, total)}` : `01–${total}`})
           </div>
 
           <div className="text-xs text-zinc-400 mt-1">

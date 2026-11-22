@@ -25,9 +25,22 @@ function formatBRL(cents: number) {
   });
 }
 
-// 01..100 fixo
-function pad2(n: number) {
+function padNumber(n: number, total: number = 500) {
+  if (total >= 1000) return String(n).padStart(4, "0");
+  if (total >= 100) return String(n).padStart(3, "0");
   return String(n).padStart(2, "0");
+}
+
+function pad2(n: number) {
+  return padNumber(n, 500);
+}
+
+function formatCountdown24h(ms: number) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  return `${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m ${String(ss).padStart(2, "0")}s`;
 }
 
 function maskName(name: string | null) {
@@ -66,9 +79,11 @@ export default function RaffleClient({
   const [msg, setMsg] = useState<string | null>(null);
 
   const [order, setOrder] = useState<null | {
+    id?: string;
     public_token: string;
     expires_at: string;
     total_cents: number;
+    numbers?: number[];
   }>(null);
 
   const [payInfo, setPayInfo] = useState<string | null>(null);
@@ -193,11 +208,13 @@ export default function RaffleClient({
         return setMsg(json?.message ?? "Falha ao reservar.");
       }
 
-      // ✅ resposta do seu /api/reserve (transacional)
+      // ✅ resposta da reserva de 24 horas
       setOrder({
+        id: json.order?.id,
         public_token: json.order.public_token,
         expires_at: json.order.expires_at,
         total_cents: json.order.total_cents,
+        numbers: json.order?.numbers ?? [...selected],
       });
 
       setPayInfo(json.payment_instructions ?? null);
@@ -232,8 +249,8 @@ export default function RaffleClient({
                 <span className="px-2 py-1 rounded-full border border-zinc-800 bg-zinc-900/60">
                   Rifa online
                 </span>
-                <span className="px-2 py-1 rounded-full border border-zinc-800 bg-zinc-900/60">
-                  Reserva {raffle.reserveMinutes} min
+                <span className="px-2 py-1 rounded-full border border-emerald-800/40 bg-emerald-950/30 text-emerald-300 font-medium">
+                  Reserva válida por 24 horas
                 </span>
                 <button
                   onClick={refreshNumbers}
@@ -368,33 +385,67 @@ export default function RaffleClient({
               )}
 
               {order && (
-                <div className="rounded-xl border border-emerald-900/40 bg-emerald-950/30 p-3 text-sm text-emerald-200">
-                  <div className="font-semibold">Reserva criada ✅</div>
-                  <div className="mt-1 text-xs text-emerald-100/80">
-                    Token:{" "}
-                    <span className="font-mono">{order.public_token}</span>
+                <div className="rounded-xl border border-emerald-900/50 bg-emerald-950/40 p-4 text-sm text-emerald-200 space-y-3">
+                  <div className="flex items-center justify-between border-b border-emerald-900/40 pb-2">
+                    <span className="font-semibold text-emerald-300 text-base">Reserva Criada ✅</span>
+                    <span className="text-xs bg-emerald-900/60 px-2 py-0.5 rounded text-emerald-100 font-mono">
+                      #{order.public_token.slice(0, 8)}
+                    </span>
                   </div>
 
-                  {/* ✅ Evita mismatch: só formata data no client depois do mount */}
-                  <div className="mt-1 text-xs text-emerald-100/80">
-                    Expira em:{" "}
-                    {mounted
-                      ? new Date(order.expires_at).toLocaleString("pt-BR")
-                      : order.expires_at}
+                  <div className="text-xs text-emerald-100/90 space-y-1">
+                    <div>
+                      <span className="text-zinc-400">Cotas reservadas:</span>{" "}
+                      <span className="font-semibold text-white">
+                        {(order.numbers ?? []).map((n) => padNumber(n, raffle.totalNumbers)).join(", ") || "—"}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-zinc-400">Total a pagar:</span>{" "}
+                      <b className="text-emerald-300 text-sm">
+                        {formatBRL(order.total_cents)}
+                      </b>
+                    </div>
+                    <div>
+                      <span className="text-zinc-400">Expira em:</span>{" "}
+                      <span>
+                        {mounted
+                          ? new Date(order.expires_at).toLocaleString("pt-BR")
+                          : order.expires_at}
+                      </span>
+                    </div>
                   </div>
 
-                  <div className="mt-2 text-sm">
-                    Total:{" "}
-                    <b className="text-emerald-100">
-                      {formatBRL(order.total_cents)}
-                    </b>
+                  {mounted && (
+                    <div className="flex items-center justify-between rounded-lg border border-amber-500/30 bg-amber-950/40 px-3 py-2 text-xs">
+                      <span className="text-amber-200">Tempo restante:</span>
+                      <span className="font-mono font-bold text-amber-300 text-sm">
+                        {formatCountdown24h(msLeft(order.expires_at))}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="rounded-lg bg-zinc-950/40 p-2.5 text-[11px] leading-relaxed text-zinc-300 border border-zinc-800">
+                    ⚠️ <b>Atenção:</b> Esta reserva tem validade fixa de <b>24 horas</b>. Realize o pagamento fora da plataforma e envie o comprovante para confirmação administrativa. Se o pagamento não for confirmado dentro das 24 horas, os números serão liberados automaticamente.
                   </div>
 
                   {payInfo && (
-                    <div className="mt-3 rounded-xl border border-emerald-900/40 bg-emerald-950/20 p-3 text-xs text-emerald-100/90 whitespace-pre-wrap">
+                    <div className="rounded-xl border border-emerald-800/40 bg-emerald-950/30 p-3 text-xs text-emerald-100/90 whitespace-pre-wrap">
+                      <div className="font-semibold text-zinc-300 mb-1">Instruções de Pagamento:</div>
                       {payInfo}
                     </div>
                   )}
+
+                  <a
+                    href={`https://api.whatsapp.com/send?text=${encodeURIComponent(
+                      `Olá! Reservei as cotas [${(order.numbers ?? []).map((n) => padNumber(n, raffle.totalNumbers)).join(", ")}] na rifa "${raffle.title}" (Token do Pedido: ${order.public_token.slice(0, 8)}). Segue em anexo o comprovante de pagamento!`
+                    )}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-center text-xs font-semibold text-white hover:bg-emerald-500 transition shadow-lg shadow-emerald-950/40"
+                  >
+                    <span>📱 Enviar Comprovante via WhatsApp</span>
+                  </a>
                 </div>
               )}
             </div>
