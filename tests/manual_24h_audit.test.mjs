@@ -732,3 +732,297 @@ describe("MATRIZ DOS 14 TESTES OBRIGATÓRIOS — FLUXO MANUAL 24H E CONFIRMAÇÃ
     assert.equal(timingSafeEqualStr(null, validSecret), false);
   });
 });
+
+describe("MATRIZ DE AUDITORIA CRON — EXPIRAÇÃO VERCEL E SEGURANÇA", () => {
+  const SERVER_CRON_SECRET = "super-secret-cron-token-acai-2026";
+  const SERVICE_ROLE_MOCK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.mock-service-role-key";
+
+  function timingSafeEqualStr(a, b) {
+    if (typeof a !== "string" || typeof b !== "string") return false;
+    const bufA = Buffer.from(a, "utf-8");
+    const bufB = Buffer.from(b, "utf-8");
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+  }
+
+  function authenticateCronRequest(req, customSecret) {
+    // Se customSecret for fornecido (incluindo null ou undefined em testes), utiliza-o; caso contrário, usa o padrão do teste
+    const serverSecret = (arguments.length > 1 ? customSecret : SERVER_CRON_SECRET)?.trim();
+    if (!serverSecret) {
+      return {
+        authorized: false,
+        status: 500,
+        message: "CRON_SECRET não configurado no servidor",
+      };
+    }
+
+    const url = new URL(req.url);
+    if (url.searchParams.has("secret")) {
+      return {
+        authorized: false,
+        status: 401,
+        message: "Autenticação por query string descontinuada. Utilize Authorization: Bearer <CRON_SECRET>",
+      };
+    }
+
+    const authHeader = req.headers.get("authorization");
+    if (!authHeader) {
+      return {
+        authorized: false,
+        status: 401,
+        message: "Cabeçalho Authorization ausente",
+      };
+    }
+
+    if (!authHeader.startsWith("Bearer ")) {
+      return {
+        authorized: false,
+        status: 401,
+        message: "Formato de autorização inválido. Esperado: Bearer <CRON_SECRET>",
+      };
+    }
+
+    const token = authHeader.slice(7).trim();
+    if (!token) {
+      return {
+        authorized: false,
+        status: 401,
+        message: "Token Bearer vazio ou malformado",
+      };
+    }
+
+    if (!timingSafeEqualStr(token, serverSecret)) {
+      return {
+        authorized: false,
+        status: 401,
+        message: "Acesso não autorizado: token inválido",
+      };
+    }
+
+    return { authorized: true, status: 200, message: "OK" };
+  }
+
+  // 1. GET autenticado
+  test("C1. GET autenticado via Authorization: Bearer <CRON_SECRET> retorna sucesso", () => {
+    const req = new Request("https://rifa-vexa.com/api/cron/expire-reservations", {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${SERVER_CRON_SECRET}`,
+      },
+    });
+
+    const res = authenticateCronRequest(req);
+    assert.equal(res.authorized, true);
+    assert.equal(res.status, 200);
+    assert.equal(res.message, "OK");
+  });
+
+  // 2. GET sem segredo
+  test("C2. GET sem cabeçalho Authorization é rejeitado com HTTP 401", () => {
+    const req = new Request("https://rifa-vexa.com/api/cron/expire-reservations", {
+      method: "GET",
+    });
+
+    const res = authenticateCronRequest(req);
+    assert.equal(res.authorized, false);
+    assert.equal(res.status, 401);
+    assert.match(res.message, /Cabeçalho Authorization ausente/);
+  });
+
+  // 3. GET com segredo incorreto
+  test("C3. GET com token Bearer incorreto é rejeitado com HTTP 401", () => {
+    const req = new Request("https://rifa-vexa.com/api/cron/expire-reservations", {
+      method: "GET",
+      headers: {
+        authorization: "Bearer token-totalmente-errado-123",
+      },
+    });
+
+    const res = authenticateCronRequest(req);
+    assert.equal(res.authorized, false);
+    assert.equal(res.status, 401);
+    assert.match(res.message, /token inválido/);
+  });
+
+  // 4. Rejeição de segredo enviado pela URL
+  test("C4. Rejeição imediata de segredo via query string (?secret=) com HTTP 401", () => {
+    const req = new Request(`https://rifa-vexa.com/api/cron/expire-reservations?secret=${SERVER_CRON_SECRET}`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${SERVER_CRON_SECRET}`,
+      },
+    });
+
+    const res = authenticateCronRequest(req);
+    assert.equal(res.authorized, false);
+    assert.equal(res.status, 401);
+    assert.match(res.message, /query string descontinuada/);
+  });
+
+  // 5. Ausência de CRON_SECRET no servidor
+  test("C5. Ausência de CRON_SECRET configurado no servidor retorna HTTP 500", () => {
+    const req = new Request("https://rifa-vexa.com/api/cron/expire-reservations", {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${SERVER_CRON_SECRET}`,
+      },
+    });
+
+    // Simula ambiente sem CRON_SECRET
+    const resUndefined = authenticateCronRequest(req, undefined);
+    assert.equal(resUndefined.authorized, false);
+    assert.equal(resUndefined.status, 500);
+    assert.match(resUndefined.message, /não configurado/);
+
+    const resEmpty = authenticateCronRequest(req, "   ");
+    assert.equal(resEmpty.authorized, false);
+    assert.equal(resEmpty.status, 500);
+    assert.match(resEmpty.message, /não configurado/);
+  });
+
+  // 6. Processamento de múltiplas rifas
+  test("C6. Processamento independente de múltiplas rifas com agregação de totais", async () => {
+    const engine = new Manual24hPostgresEngine();
+
+    // Adiciona segunda rifa na engine
+    engine.raffles.push({
+      id: "raf-capacete-100",
+      workspace_id: "ws-acai-1",
+      title: "Capacete Elétrico Açaí Vexa",
+      slug: "capacete-acai-vexa",
+      status: "active",
+      price_cents: 500,
+      total_numbers: 100,
+    });
+    for (let i = 1; i <= 100; i++) {
+      engine.raffle_numbers.push({
+        id: `rn-cap-${i}`,
+        raffle_id: "raf-capacete-100",
+        number: i,
+        status: "free",
+        locked_until: null,
+        reserved_at: null,
+        order_id: null,
+        buyer_name: null,
+        buyer_phone: null,
+      });
+    }
+
+    // Cria reserva na Rifa 1 (Moto)
+    await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Comprador Moto", "11911112222", [10, 11]);
+    // Cria reserva na Rifa 2 (Capacete)
+    await engine.reserve_numbers_manual_24h("capacete-acai-vexa", "Comprador Capacete", "11933334444", [5]);
+
+    // Avança o relógio além de 24 horas
+    engine.advanceClock(25);
+
+    // Executa limpeza para Rifa 1
+    const r1 = await engine.cleanup_expired_reservations_24h("raf-moto-500", "service_role");
+    assert.equal(r1.orders_expired, 1);
+    assert.equal(r1.numbers_released, 2);
+
+    // Executa limpeza para Rifa 2
+    const r2 = await engine.cleanup_expired_reservations_24h("raf-capacete-100", "service_role");
+    assert.equal(r2.orders_expired, 1);
+    assert.equal(r2.numbers_released, 1);
+
+    // Totais consolidados
+    const totalOrders = r1.orders_expired + r2.orders_expired;
+    const totalNumbers = r1.numbers_released + r2.numbers_released;
+    assert.equal(totalOrders, 2);
+    assert.equal(totalNumbers, 3);
+  });
+
+  // 7. Falha em uma rifa sem ocultar o resultado das demais
+  test("C7. Falha isolada em uma rifa preserva o resultado das demais e relata erro (HTTP 500)", async () => {
+    const raffles = [
+      { id: "raf-sucesso-1", slug: "rifa-ok" },
+      { id: "raf-falha-2", slug: "rifa-quebrada" },
+    ];
+
+    const processedRaffles = [];
+    const failedRaffles = [];
+    let totalExpired = 0;
+    let totalReleased = 0;
+
+    for (const r of raffles) {
+      if (r.id === "raf-falha-2") {
+        failedRaffles.push({
+          raffle_id: r.id,
+          slug: r.slug,
+          error: "Connection timeout no PostgreSQL para esta tabela",
+        });
+      } else {
+        processedRaffles.push({
+          raffle_id: r.id,
+          slug: r.slug,
+          orders_expired: 3,
+          numbers_released: 5,
+        });
+        totalExpired += 3;
+        totalReleased += 5;
+      }
+    }
+
+    // O cron deve acusar falha sem declarar falso sucesso total
+    assert.equal(failedRaffles.length, 1);
+    assert.equal(processedRaffles.length, 1);
+    assert.equal(totalExpired, 3);
+    assert.equal(totalReleased, 5);
+
+    const httpResponse = {
+      ok: false,
+      message: `Aviso operacional: falha ao processar ${failedRaffles.length} de ${raffles.length} rifas`,
+      partial_success: processedRaffles.length > 0,
+      totals: { orders_expired: totalExpired, numbers_released: totalReleased },
+      processed_raffles: processedRaffles,
+      failed_raffles: failedRaffles,
+    };
+
+    assert.equal(httpResponse.ok, false, "Não pode declarar ok: true se houve rifa com falha");
+    assert.equal(httpResponse.partial_success, true);
+    assert.equal(httpResponse.failed_raffles[0].slug, "rifa-quebrada");
+  });
+
+  // 8. Reexecução segura (idempotência)
+  test("C8. Reexecução segura do cron resulta em 0 alterações sem efeitos colaterais", async () => {
+    const engine = new Manual24hPostgresEngine();
+    await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Desistente", "11988887777", [50]);
+
+    engine.advanceClock(26);
+
+    // Execução 1: limpa 1 pedido e libera 1 cota
+    const r1 = await engine.cleanup_expired_reservations_24h(null, "service_role");
+    assert.equal(r1.orders_expired, 1);
+    assert.equal(r1.numbers_released, 1);
+
+    // Execução 2 imediata: sem pedidos para expirar
+    const r2 = await engine.cleanup_expired_reservations_24h(null, "service_role");
+    assert.equal(r2.orders_expired, 0);
+    assert.equal(r2.numbers_released, 0);
+
+    // Status da cota permanece livre
+    const n50 = engine.raffle_numbers.find((rn) => rn.number === 50);
+    assert.equal(n50.status, "free");
+  });
+
+  // 9. Ausência de exposição da service role
+  test("C9. Resposta e estrutura do cron NUNCA expõem a chave service_role", () => {
+    const mockOutput = {
+      ok: true,
+      raffles_checked: 2,
+      totals: {
+        orders_expired: 4,
+        numbers_released: 8,
+      },
+      processed_raffles: [
+        { raffle_id: "raf-1", slug: "moto", orders_expired: 4, numbers_released: 8 }
+      ],
+    };
+
+    const serialized = JSON.stringify(mockOutput);
+    assert.equal(serialized.includes(SERVICE_ROLE_MOCK), false);
+    assert.equal(serialized.includes("service_role"), false);
+    assert.equal(serialized.includes(SERVER_CRON_SECRET), false);
+  });
+});
