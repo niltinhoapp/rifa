@@ -2,6 +2,7 @@
 /node_modules
 /.pnpm-store
 *.tsbuildinfo
+.codegraph/
 
 # Next.js build
 /.next/
