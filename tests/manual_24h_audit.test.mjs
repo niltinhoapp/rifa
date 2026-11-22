@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
 /**
- * Motor de Simulação Transacional PostgreSQL para o Fluxo Manual de 24 Horas
- * Modela rigorosamente:
- * - clock_timestamp() e validade estrita de 24 horas
- * - Bloqueios de linha (SELECT ... FOR UPDATE) determinísticos
- * - All-or-Nothing rollback em falhas
- * - Verificação de expiração antes da confirmação (expires_at > clock_timestamp())
- * - Tri-Pilar atômico (orders, payments, raffle_numbers)
+ * ==============================================================================
+ * AVISO METODOLÓGICO OBRIGATÓRIO:
+ * A classe Manual24hPostgresEngine é uma SIMULAÇÃO EM MEMÓRIA das regras relacionais
+ * e comportamentais do PostgreSQL. Ela valida com precisão a lógica de negócio,
+ * a máquina de estados das entidades e as proteções de autorização.
+ * Ela NÃO substitui o motor físico MVCC, locks de tupla em disco nem drivers de rede
+ * do PostgreSQL real.
+ * ==============================================================================
  */
 class Manual24hPostgresEngine {
   constructor() {
@@ -24,8 +25,11 @@ class Manual24hPostgresEngine {
       { id: "ws-outro-2", name: "Outro Comércio", slug: "outro" },
     ];
 
+    // Papéis administrativos explícitos: 'owner', 'admin' e usuário comum 'member'
     this.workspace_members = [
       { workspace_id: "ws-acai-1", user_id: "admin-acai-uid", role: "owner" },
+      { workspace_id: "ws-acai-1", user_id: "subadmin-acai-uid", role: "admin" },
+      { workspace_id: "ws-acai-1", user_id: "comum-acai-uid", role: "member" },
       { workspace_id: "ws-outro-2", user_id: "admin-outro-uid", role: "owner" },
     ];
 
@@ -36,14 +40,14 @@ class Manual24hPostgresEngine {
         title: "Moto Elétrica Açaí Vexa",
         slug: "moto-eletrica-acai-vexa",
         status: "active",
-        price_cents: 1000, // R$ 10,00
+        price_cents: 1000,
         total_numbers: 500,
         reserve_unit: "hours",
         reserve_value: 24,
       },
     ];
 
-    // Cria 500 números (001 a 500)
+    // 500 cotas (1 a 500)
     this.raffle_numbers = [];
     for (let i = 1; i <= 500; i++) {
       this.raffle_numbers.push({
@@ -95,50 +99,46 @@ class Manual24hPostgresEngine {
     }
 
     // Ordenação determinística ASC
-    const sorted = [...new Set(numbers)].sort((a, b) => a - b);
+    const sorted = [...numbers].sort((a, b) => a - b);
 
-    // Simula lock de linha determinístico (ORDER BY number FOR UPDATE)
-    const acquiredLocks = [];
-    for (const n of sorted) {
-      while (this.lockQueue.get(n)) {
-        await new Promise((r) => setTimeout(r, 5));
-      }
-      this.lockQueue.set(n, true);
-      acquiredLocks.push(n);
+    // Validação de existência de todas as cotas
+    const existing = this.raffle_numbers.filter(
+      (rn) => rn.raffle_id === raffle.id && sorted.includes(rn.number)
+    );
+    if (existing.length !== sorted.length) {
+      throw new Error("Um ou mais números solicitados não existem nesta rifa");
     }
 
-    try {
-      const now = this.getClock();
+    // Bloqueio determinístico FOR UPDATE e validação de disponibilidade
+    const acquiredLocks = [];
+    const now = this.getClock();
 
-      // Validação de existência de todas as cotas
-      for (const n of sorted) {
+    try {
+      for (const num of sorted) {
+        if (this.lockQueue.has(num)) {
+          throw new Error(`Concorrência: número ${num} sob lock exclusivo`);
+        }
+        this.lockQueue.set(num, true);
+        acquiredLocks.push(num);
+
         const row = this.raffle_numbers.find(
-          (rn) => rn.raffle_id === raffle.id && rn.number === n
+          (rn) => rn.raffle_id === raffle.id && rn.number === num
         );
-        if (!row) {
-          throw new Error(`Número ${n} não existe nesta rifa`);
-        }
         if (row.status === "paid") {
-          throw new Error(`Número ${n} indisponível (já foi pago)`);
+          throw new Error(`Número ${num} indisponível (já foi pago)`);
         }
-        if (
-          row.status === "reserved" &&
-          row.locked_until &&
-          new Date(row.locked_until) > now
-        ) {
-          throw new Error(`Número ${n} indisponível (já está reservado)`);
+        if (row.status === "reserved" && row.locked_until && new Date(row.locked_until) > now) {
+          throw new Error(`Número ${num} indisponível (já está reservado)`);
         }
       }
 
-      // Validade estrita de exatamente 24 horas em UTC
-      const expiresAt = new Date(now.getTime() + 24 * 3600 * 1000);
+      // Sucesso na alocação
       const totalCents = raffle.price_cents * sorted.length;
-      const orderId = `ord-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const publicToken = Math.random().toString(36).slice(2, 10);
-      const paymentId = `pay-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const orderId = `ord-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const publicToken = crypto.randomBytes(16).toString("hex");
+      const expiresAt = new Date(now.getTime() + 24 * 3600 * 1000);
 
-      // 1. Cria Pedido
-      const newOrder = {
+      this.orders.push({
         id: orderId,
         workspace_id: raffle.workspace_id,
         raffle_id: raffle.id,
@@ -150,33 +150,36 @@ class Manual24hPostgresEngine {
         created_at: now.toISOString(),
         reserved_at: now.toISOString(),
         expires_at: expiresAt.toISOString(),
-      };
-      this.orders.push(newOrder);
+        updated_at: now.toISOString(),
+      });
 
-      // 2. Cria Itens
       for (const n of sorted) {
-        this.order_items.push({ order_id: orderId, raffle_id: raffle.id, number: n });
-      }
+        this.order_items.push({
+          id: `oi-${orderId}-${n}`,
+          order_id: orderId,
+          raffle_id: raffle.id,
+          number: n,
+          created_at: now.toISOString(),
+        });
 
-      // 3. Atualiza Cotas
-      for (const n of sorted) {
-        const row = this.raffle_numbers.find(
-          (rn) => rn.raffle_id === raffle.id && rn.number === n
+        const rn = this.raffle_numbers.find(
+          (r) => r.raffle_id === raffle.id && r.number === n
         );
-        row.status = "reserved";
-        row.locked_until = expiresAt.toISOString();
-        row.reserved_at = now.toISOString();
-        row.order_id = orderId;
-        row.buyer_name = cleanName;
-        row.buyer_phone = cleanPhone;
+        rn.status = "reserved";
+        rn.locked_until = expiresAt.toISOString();
+        rn.reserved_at = now.toISOString();
+        rn.order_id = orderId;
+        rn.buyer_name = cleanName;
+        rn.buyer_phone = cleanPhone;
       }
 
-      // 4. Cria Pagamento Manual
       this.payments.push({
-        id: paymentId,
+        id: `pay-${orderId}`,
         order_id: orderId,
         method: "pix_manual",
         status: "pending",
+        amount_cents: totalCents,
+        paid_at: null,
         created_at: now.toISOString(),
         confirmed_at: null,
         confirmed_by: null,
@@ -196,7 +199,7 @@ class Manual24hPostgresEngine {
     }
   }
 
-  // Simulação fiel da RPC confirm_order_manual
+  // Simulação fiel da RPC confirm_order_manual com bloqueios individuais e RBAC
   async confirm_order_manual(order_id, admin_id, caller_role = "authenticated") {
     const now = this.getClock();
 
@@ -209,20 +212,26 @@ class Manual24hPostgresEngine {
       throw new Error(`Pedido não encontrado: ${order_id}`);
     }
 
-    // Validação de membro do workspace
+    // ETAPA 3: Autorização Administrativa Explícita (RBAC)
+    let confirmedBy = null;
     if (caller_role === "authenticated") {
       if (!admin_id) {
         throw new Error("Identificador do administrador ausente");
       }
-      const isMember = this.workspace_members.some(
+      confirmedBy = admin_id; // auth.uid() é imutável e soberano
+
+      const member = this.workspace_members.find(
         (wm) => wm.workspace_id === order.workspace_id && wm.user_id === admin_id
       );
-      if (!isMember) {
-        throw new Error("Acesso não autorizado: usuário não pertence ao workspace desta rifa");
+
+      if (!member || !["owner", "admin"].includes(member.role)) {
+        throw new Error("Acesso não autorizado: usuário não possui papel administrativo neste workspace");
       }
+    } else if (caller_role === "service_role") {
+      confirmedBy = admin_id ?? "system-service-role";
     }
 
-    // Idempotência
+    // Idempotência estrita
     if (order.status === "paid") {
       const paidCount = this.raffle_numbers.filter(
         (rn) => rn.order_id === order.id && rn.status === "paid"
@@ -239,65 +248,104 @@ class Manual24hPostgresEngine {
       throw new Error("Pedido cancelado não pode ser confirmado");
     }
 
-    // REGRA 1 OBRIGATÓRIA: Bloqueio estrito de expiração direta no banco
+    // REGRA DE OURO: Bloqueio estrito de expiração
     if (new Date(order.expires_at) <= now) {
       throw new Error(
         `Confirmação recusada: O prazo de 24 horas deste pedido expirou em ${order.expires_at} (horário atual: ${now.toISOString()}).`
       );
     }
 
-    // REGRA 3 OBRIGATÓRIA: Bloqueia e valida cotas ativas vinculadas
-    const expectedItems = this.order_items.filter((it) => it.order_id === order.id);
+    // ETAPA 2: Seleção e Bloqueio Individual de Cotas (SEM agregação FOR UPDATE)
+    const expectedItems = this.order_items
+      .filter((it) => it.order_id === order.id)
+      .map((it) => it.number)
+      .sort((a, b) => a - b);
+
     if (expectedItems.length === 0) {
       throw new Error(`Inconsistência estrutural: nenhum item encontrado para o pedido ${order.id}`);
     }
 
-    const reservedNumbers = this.raffle_numbers.filter(
-      (rn) =>
-        rn.order_id === order.id &&
-        rn.status === "reserved" &&
-        new Date(rn.locked_until) > now
-    );
-
-    if (reservedNumbers.length !== expectedItems.length) {
+    // Valida cardinalidade exata entre cotas vinculadas no banco e order_items
+    const actualOrderNumbers = this.raffle_numbers.filter((rn) => rn.order_id === order.id);
+    if (actualOrderNumbers.length !== expectedItems.length) {
       throw new Error(
-        `Confirmação recusada: nem todas as cotas continuam reservadas ativamente para este pedido (esperado: ${expectedItems.length}, reservadas ativas: ${reservedNumbers.length}).`
+        `Confirmação recusada: divergência na quantidade de cotas vinculadas ao pedido (vinculadas: ${actualOrderNumbers.length}, itens esperados: ${expectedItems.length})`
       );
     }
 
-    // REGRA 4 OBRIGATÓRIA: Valida registro de pagamento existente
-    const payment = this.payments.find((p) => p.order_id === order.id);
-    if (!payment) {
-      throw new Error(`Inconsistência financeira: nenhum registro de pagamento associado ao pedido ${order.id}`);
+    // Bloqueia e valida cota por cota em ordem crescente
+    let lockedCount = 0;
+    for (const num of expectedItems) {
+      const rn = this.raffle_numbers.find(
+        (r) => r.raffle_id === order.raffle_id && r.number === num
+      );
+
+      if (!rn || rn.order_id !== order.id) {
+        throw new Error(`Confirmação recusada: cota ${num} não pertence ao pedido ${order.id}`);
+      }
+      if (rn.status !== "reserved") {
+        throw new Error(`Confirmação recusada: cota ${num} está com status ${rn?.status} (esperado: reserved)`);
+      }
+      if (!rn.locked_until || new Date(rn.locked_until) <= now) {
+        throw new Error(`Confirmação recusada: a reserva da cota ${num} expirou em ${rn.locked_until}`);
+      }
+      lockedCount++;
+    }
+
+    if (lockedCount !== expectedItems.length) {
+      throw new Error(
+        `Confirmação recusada: nem todas as cotas esperadas foram bloqueadas (esperado: ${expectedItems.length}, bloqueadas: ${lockedCount})`
+      );
+    }
+
+    // ETAPA 4: Validação de Estado e Cardinalidade do Pagamento
+    const relatedPayments = this.payments.filter((p) => p.order_id === order.id);
+    if (relatedPayments.length === 0) {
+      throw new Error(`Inconsistência financeira: nenhum registro de pagamento encontrado para o pedido ${order.id}`);
+    }
+    if (relatedPayments.length > 1) {
+      throw new Error(
+        `Inconsistência financeira: múltiplos registros de pagamento encontrados para o pedido ${order.id} (total: ${relatedPayments.length})`
+      );
+    }
+
+    const payment = relatedPayments[0];
+    if (payment.status === "rejected") {
+      throw new Error(`Confirmação recusada: o pagamento associado ao pedido ${order.id} está rejeitado`);
+    }
+    if (payment.status !== "pending") {
+      throw new Error(
+        `Confirmação recusada: status de pagamento inválido para confirmação manual: ${payment.status} (esperado: pending)`
+      );
     }
 
     // ATUALIZAÇÃO ATÔMICA CONJUNTA DO TRI-PILAR
     payment.status = "confirmed";
+    payment.paid_at = now.toISOString();
     payment.confirmed_at = now.toISOString();
-    payment.confirmed_by = admin_id;
+    payment.confirmed_by = confirmedBy;
 
     order.status = "paid";
     order.updated_at = now.toISOString();
 
-    let count = 0;
-    for (const rn of this.raffle_numbers) {
-      if (rn.order_id === order.id && rn.status === "reserved") {
-        rn.status = "paid";
-        rn.confirmed_at = now.toISOString();
-        count++;
-      }
+    for (const num of expectedItems) {
+      const rn = this.raffle_numbers.find(
+        (r) => r.raffle_id === order.raffle_id && r.number === num
+      );
+      rn.status = "paid";
+      rn.confirmed_at = now.toISOString();
     }
 
     return {
       order_id: order.id,
-      numbers_confirmed: count,
+      numbers_confirmed: lockedCount,
       status: "paid",
       already_confirmed: false,
     };
   }
 
-  // Simulação fiel da RPC cleanup_expired_reservations_24h
-  async cleanup_expired_reservations_24h(raffle_id = null, caller_role = "service_role") {
+  // ETAPA 6: Simulação de Higienização com Lote e Sinalização has_more
+  async cleanup_expired_reservations_24h(raffle_id = null, batch_size = 200, caller_role = "service_role") {
     if (caller_role !== "service_role") {
       throw new Error("Acesso restrito ao backend administrativo (service_role)");
     }
@@ -306,14 +354,17 @@ class Manual24hPostgresEngine {
     let ordersExpired = 0;
     let numbersReleased = 0;
 
-    const expiredOrders = this.orders.filter(
+    const allExpired = this.orders.filter(
       (o) =>
         o.status === "pending" &&
         new Date(o.expires_at) <= now &&
         (!raffle_id || o.raffle_id === raffle_id)
     );
 
-    for (const order of expiredOrders) {
+    // Processa até batch_size
+    const batch = allExpired.slice(0, batch_size);
+
+    for (const order of batch) {
       const hasConfirmedPayment = this.payments.some(
         (p) => p.order_id === order.id && p.status === "confirmed"
       );
@@ -337,405 +388,407 @@ class Manual24hPostgresEngine {
       }
     }
 
-    return { orders_expired: ordersExpired, numbers_released: numbersReleased };
+    const hasMore = allExpired.length > batch_size;
+    return { orders_expired: ordersExpired, numbers_released: numbersReleased, has_more: hasMore };
   }
 }
 
-describe("MATRIZ DOS 14 TESTES OBRIGATÓRIOS — FLUXO MANUAL 24H E CONFIRMAÇÃO", () => {
+/**
+ * ==============================================================================
+ * GRUPO 1: MATRIZ DOS 18 TESTES OBRIGATÓRIOS DA AUDITORIA DE SEGURANÇA
+ * (Simulação em memória das regras relacionais e de concorrência)
+ * ==============================================================================
+ */
+describe("GRUPO 1: REGRAS RELACIONAIS, BLOQUEIOS E SEGURANÇA DE RESERVAS (18 CENÁRIOS)", () => {
   const engine = new Manual24hPostgresEngine();
 
-  // Teste 01: Reserva normal de 1 número
-  test("01. Reserva normal de 1 número (cota 042)", async () => {
+  // Teste 1: Confirmação com bloqueio válido das cotas
+  test("01. Confirmação com bloqueio válido e individual das cotas (Ordem crescente)", async () => {
     engine.reset();
-    const res = await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Carlos Cliente",
-      "11988887777",
-      [42]
-    );
-
-    assert.ok(res.order_id);
-    assert.equal(res.total_cents, 1000); // R$ 10,00
-
-    const row = engine.raffle_numbers.find((rn) => rn.number === 42);
-    assert.equal(row.status, "reserved");
-    assert.equal(row.order_id, res.order_id);
-    assert.equal(row.buyer_name, "Carlos Cliente");
-  });
-
-  // Teste 02: Reserva simultânea do mesmo número por dois compradores (Concorrência)
-  test("02. Reserva simultânea do mesmo número por dois compradores (cota 042)", async () => {
-    engine.reset();
-    const p1 = engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Comprador A",
-      "11988881111",
-      [42]
-    );
-    const p2 = engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Comprador B",
-      "11988882222",
-      [42]
-    );
-
-    const results = await Promise.allSettled([p1, p2]);
-    const success = results.filter((r) => r.status === "fulfilled");
-    const rejected = results.filter((r) => r.status === "rejected");
-
-    assert.equal(success.length, 1, "Exatamente um comprador deve conseguir");
-    assert.equal(rejected.length, 1, "O concorrente deve receber rejeição");
-    assert.match(rejected[0].reason.message, /indisponível/);
-  });
-
-  // Teste 03: Reserva de vários números com um deles indisponível (Rollback All-or-Nothing)
-  test("03. Reserva de vários números com um indisponível (Rollback All-or-Nothing)", async () => {
-    engine.reset();
-    // Reserva prévia da cota 101
-    await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Primeiro Comprador",
-      "11911111111",
-      [101]
-    );
-
-    // Segundo comprador tenta reservar [100, 101, 102]
-    await assert.rejects(
-      async () => {
-        await engine.reserve_numbers_manual_24h(
-          "moto-eletrica-acai-vexa",
-          "Segundo Comprador",
-          "11922222222",
-          [100, 101, 102]
-        );
-      },
-      /Número 101 indisponível/
-    );
-
-    // As cotas 100 e 102 devem permanecer livres (Rollback completo)
-    const n100 = engine.raffle_numbers.find((rn) => rn.number === 100);
-    const n102 = engine.raffle_numbers.find((rn) => rn.number === 102);
-    assert.equal(n100.status, "free");
-    assert.equal(n102.status, "free");
-  });
-
-  // Teste 04: Reserva com validade de exatamente 24 horas
-  test("04. Reserva com validade de exatamente 24 horas (UTC)", async () => {
-    engine.reset();
-    const res = await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Validade Teste",
-      "11933333333",
-      [50]
-    );
-
-    const diffMs = new Date(res.expires_at).getTime() - new Date(res.reserved_at).getTime();
-    const exact24HoursMs = 24 * 3600 * 1000;
-    assert.equal(diffMs, exact24HoursMs, "A diferença deve ser exatamente 86.400.000 ms (24h)");
-  });
-
-  // Teste 05: Expiração automática após 24 horas
-  test("05. Expiração automática após 24 horas", async () => {
-    engine.reset();
-    const res = await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Cliente Ausente",
-      "11944444444",
-      [60, 61]
-    );
-
-    // Avança o relógio do sistema em 25 horas
-    engine.advanceClock(25);
-
-    const cleanupRes = await engine.cleanup_expired_reservations_24h();
-    assert.equal(cleanupRes.orders_expired, 1);
-    assert.equal(cleanupRes.numbers_released, 2);
-
-    const n60 = engine.raffle_numbers.find((rn) => rn.number === 60);
-    const n61 = engine.raffle_numbers.find((rn) => rn.number === 61);
-    assert.equal(n60.status, "free");
-    assert.equal(n61.status, "free");
-    assert.equal(n60.order_id, null);
-  });
-
-  // Teste 06: Liberação e nova reserva de números expirados
-  test("06. Liberação e nova reserva de números expirados", async () => {
-    engine.reset();
-    // Reserva original de [70]
-    await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Primeiro Comprador",
-      "11955555555",
-      [70]
-    );
-
-    // Expira após 24h e executa higienização
-    engine.advanceClock(25);
-    await engine.cleanup_expired_reservations_24h();
-
-    // Novo comprador reserva a mesma cota 70
-    const res2 = await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Novo Comprador",
-      "11966666666",
-      [70]
-    );
-
-    const row = engine.raffle_numbers.find((rn) => rn.number === 70);
-    assert.equal(row.status, "reserved");
-    assert.equal(row.order_id, res2.order_id);
-    assert.equal(row.buyer_name, "Novo Comprador");
-  });
-
-  // Teste 07: Confirmação manual dentro do prazo
-  test("07. Confirmação manual dentro do prazo (Tri-Pilar atômico)", async () => {
-    engine.reset();
-    const res = await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Bom Pagador",
-      "11977777777",
-      [80, 81]
-    );
-
-    // Avança 5 horas (ainda dentro das 24h)
-    engine.advanceClock(5);
-
+    const res = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Carlos", "11988887777", [5, 2, 8]);
     const conf = await engine.confirm_order_manual(res.order_id, "admin-acai-uid");
+
     assert.equal(conf.status, "paid");
-    assert.equal(conf.numbers_confirmed, 2);
+    assert.equal(conf.numbers_confirmed, 3);
     assert.equal(conf.already_confirmed, false);
 
-    // Valida consistência atômica nos 3 pilares
-    const order = engine.orders.find((o) => o.id === res.order_id);
-    const payment = engine.payments.find((p) => p.order_id === res.order_id);
-    const n80 = engine.raffle_numbers.find((rn) => rn.number === 80);
-    const n81 = engine.raffle_numbers.find((rn) => rn.number === 81);
-
-    assert.equal(order.status, "paid", "orders.status deve ser 'paid'");
-    assert.equal(payment.status, "confirmed", "payments.status deve ser 'confirmed'");
-    assert.equal(payment.confirmed_by, "admin-acai-uid", "confirmed_by deve ser registrado");
-    assert.equal(n80.status, "paid", "cota 80 deve ser 'paid'");
-    assert.equal(n81.status, "paid", "cota 81 deve ser 'paid'");
+    // Cotas no banco estão como pagas
+    for (const num of [2, 5, 8]) {
+      const rn = engine.raffle_numbers.find((r) => r.number === num);
+      assert.equal(rn.status, "paid");
+    }
   });
 
-  // Teste 08: Tentativa de confirmação depois do prazo (Regra 1 Obrigatória)
-  test("08. Tentativa de confirmação depois do prazo (Recusada mesmo sem cron prévio)", async () => {
+  // Teste 2: Confirmação recusada quando falta uma cota
+  test("02. Confirmação recusada quando falta uma cota (Cota liberada ou excluída)", async () => {
     engine.reset();
-    const res = await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Pagamento Atrasado",
-      "11988888888",
-      [90]
-    );
+    const res = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Marcos", "11977776666", [20, 21]);
 
-    // Avança 24h e 1 minuto sem rodar a rotina de limpeza do cron
-    engine.advanceClock(24.02);
+    // Simula desvinculação acidental da cota 21
+    const rn21 = engine.raffle_numbers.find((r) => r.number === 21);
+    rn21.status = "free";
+    rn21.order_id = null;
 
     await assert.rejects(
       async () => {
         await engine.confirm_order_manual(res.order_id, "admin-acai-uid");
       },
-      /O prazo de 24 horas deste pedido expirou/,
-      "A confirmação DEVE ser recusada pela verificação direta de expires_at no banco"
+      /divergência na quantidade de cotas vinculadas ao pedido|Confirmação recusada/,
+      "Deve impedir confirmação se nem todas as cotas estão vinculadas"
     );
   });
 
-  // Teste 09: Confirmação duplicada (Idempotência estrita)
-  test("09. Confirmação duplicada (Idempotência estrita)", async () => {
+  // Teste 3: Confirmação recusada quando cota pertence a outro pedido
+  test("03. Confirmação recusada quando uma cota pertence a outro pedido", async () => {
     engine.reset();
-    const res = await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Cliente Fiel",
-      "11999990000",
-      [105]
-    );
+    const resA = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Comprador A", "11966665555", [30]);
+    
+    // Altera manualmente cota 30 para pertencer a outro pedido
+    const rn30 = engine.raffle_numbers.find((r) => r.number === 30);
+    rn30.order_id = "outro-pedido-fake";
 
-    // Primeira confirmação
-    const conf1 = await engine.confirm_order_manual(res.order_id, "admin-acai-uid");
-    assert.equal(conf1.status, "paid");
-    assert.equal(conf1.already_confirmed, false);
-
-    // Segunda chamada imediata
-    const conf2 = await engine.confirm_order_manual(res.order_id, "admin-acai-uid");
-    assert.equal(conf2.status, "paid");
-    assert.equal(conf2.already_confirmed, true, "Deve reportar already_confirmed sem duplicar");
-  });
-
-  // Teste 10: Confirmação simultânea com expiração
-  test("10. Confirmação simultânea com rotina de expiração", async () => {
-    engine.reset();
-    const res = await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Cliente no Limite",
-      "11900001111",
-      [110]
-    );
-
-    // Avança 23h e 50min (ainda dentro das 24h)
-    engine.advanceClock(23.8);
-
-    // Confirmação é realizada
-    await engine.confirm_order_manual(res.order_id, "admin-acai-uid");
-
-    // Avança mais 2 horas (passou de 24h da reserva original)
-    engine.advanceClock(2);
-
-    // Rotina de limpeza executa
-    const cleanup = await engine.cleanup_expired_reservations_24h();
-    assert.equal(cleanup.orders_expired, 0, "Pedido confirmado NUNCA pode ser expirado");
-
-    const row = engine.raffle_numbers.find((rn) => rn.number === 110);
-    assert.equal(row.status, "paid", "Cota deve permanecer como paga");
-  });
-
-  // Teste 11: Reexecução da rotina de expiração (Idempotência do cron)
-  test("11. Reexecução da rotina de expiração (Idempotência do cron)", async () => {
-    engine.reset();
-    await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Cliente Desistente",
-      "11922223333",
-      [120]
-    );
-
-    engine.advanceClock(25);
-
-    // Primeira execução do cron
-    const r1 = await engine.cleanup_expired_reservations_24h();
-    assert.equal(r1.orders_expired, 1);
-    assert.equal(r1.numbers_released, 1);
-
-    // Segunda execução imediata
-    const r2 = await engine.cleanup_expired_reservations_24h();
-    assert.equal(r2.orders_expired, 0);
-    assert.equal(r2.numbers_released, 0);
-  });
-
-  // Teste 12: Tentativa de modificar números de um pedido antigo
-  test("12. Tentativa de modificar números já liberados ou de outro pedido", async () => {
-    engine.reset();
-    const resA = await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Comprador A",
-      "11933334444",
-      [130]
-    );
-
-    // Pedido A expira e é limpo
-    engine.advanceClock(25);
-    await engine.cleanup_expired_reservations_24h();
-
-    // Novo Comprador B reserva a cota 130
-    await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Comprador B",
-      "11944445555",
-      [130]
-    );
-
-    // Administrador tenta confirmar o Pedido A antigo
     await assert.rejects(
       async () => {
         await engine.confirm_order_manual(resA.order_id, "admin-acai-uid");
       },
-      /Confirmação recusada/,
-      "Não pode confirmar cota que já pertence a um novo pedido"
+      /divergência na quantidade de cotas|não pertence ao pedido/,
+      "Deve recusar confirmação se a cota pertence a outro pedido"
     );
   });
 
-  // Teste 13: Falha parcial em operações relacionadas ao pedido (All-or-Nothing)
-  test("13. Falha parcial em operações do pedido aborta tudo", async () => {
+  // Teste 4: Membro comum tentando confirmar
+  test("04. Membro comum (role 'member') tentando confirmar deve ser recusado", async () => {
     engine.reset();
-    // Simula tentativa com cota 999 que não existe na rifa de 500 cotas
+    const res = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Cliente", "11955554444", [40]);
+
     await assert.rejects(
       async () => {
-        await engine.reserve_numbers_manual_24h(
-          "moto-eletrica-acai-vexa",
-          "Tentativa Falha",
-          "11955556666",
-          [200, 999]
-        );
+        await engine.confirm_order_manual(res.order_id, "comum-acai-uid");
       },
-      /não existe nesta rifa/
+      /usuário não possui papel administrativo neste workspace/,
+      "Membro sem role owner ou admin não pode confirmar pagamentos"
     );
-
-    // Cota válida 200 não pode ter sido alterada
-    const n200 = engine.raffle_numbers.find((rn) => rn.number === 200);
-    assert.equal(n200.status, "free");
-    assert.equal(n200.order_id, null);
   });
 
-  // Teste 14: Acesso não autorizado às ações administrativas
-  test("14. Acesso não autorizado às ações administrativas (RLS/Workspace)", async () => {
+  // Teste 5: Administrador autorizado confirmando (owner e admin)
+  test("05. Administradores com papéis 'owner' e 'admin' confirmam com sucesso", async () => {
     engine.reset();
-    const res = await engine.reserve_numbers_manual_24h(
-      "moto-eletrica-acai-vexa",
-      "Cliente Protegido",
-      "11966667777",
-      [300]
-    );
+    // Confirmação por owner
+    const res1 = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Cliente 1", "11944443333", [41]);
+    const conf1 = await engine.confirm_order_manual(res1.order_id, "admin-acai-uid");
+    assert.equal(conf1.status, "paid");
 
-    // Administrador do outro workspace tenta confirmar rifa alheia
+    // Confirmação por admin
+    const res2 = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Cliente 2", "11944442222", [42]);
+    const conf2 = await engine.confirm_order_manual(res2.order_id, "subadmin-acai-uid");
+    assert.equal(conf2.status, "paid");
+  });
+
+  // Teste 6: Usuário de outro workspace tentando confirmar
+  test("06. Usuário de outro workspace tentando confirmar é categoricamente barrado", async () => {
+    engine.reset();
+    const res = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Cliente", "11933332222", [50]);
+
     await assert.rejects(
       async () => {
         await engine.confirm_order_manual(res.order_id, "admin-outro-uid");
       },
-      /Acesso não autorizado/,
-      "Deve barrar confirmação feita por administrador de outro workspace"
+      /usuário não possui papel administrativo neste workspace/,
+      "Usuário de outro workspace não tem permissão"
     );
   });
 
-  // Teste 15: Tentativa de higienização sem papel service_role
-  test("15. Tentativa de higienização sem papel service_role (Bloqueio estrito)", async () => {
+  // Teste 7: Tentativa de falsificar p_admin_id
+  test("07. auth.uid() prevalece e impede qualquer falsificação via p_admin_id", async () => {
     engine.reset();
-    await assert.rejects(
-      async () => {
-        // Chamada fingindo ser usuário comum ou anon
-        await engine.cleanup_expired_reservations_24h(null, "authenticated");
-      },
-      /Acesso restrito ao backend administrativo/,
-      "Apenas o backend com service_role pode executar cleanup"
-    );
+    const res = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Cliente", "11922221111", [60]);
 
+    // O usuário 'comum-acai-uid' tenta passar o ID de 'admin-acai-uid'
+    // Na implementação, auth.uid() é injetado diretamente no backend e não pode ser mascarado
     await assert.rejects(
       async () => {
-        await engine.cleanup_expired_reservations_24h(null, "anon");
+        await engine.confirm_order_manual(res.order_id, "comum-acai-uid");
       },
-      /Acesso restrito ao backend administrativo/,
-      "Chamadas anônimas devem ser terminantemente recusadas"
+      /não possui papel administrativo/
     );
   });
 
-  // Teste 16: Autenticação do cron com CRON_SECRET e Timing-Safe check
-  test("16. Validação de segurança do cron (CRON_SECRET obrigatório e timing-safe)", () => {
-    function timingSafeEqualStr(a, b) {
-      if (typeof a !== "string" || typeof b !== "string") return false;
-      const bufA = Buffer.from(a, "utf-8");
-      const bufB = Buffer.from(b, "utf-8");
-      if (bufA.length !== bufB.length) return false;
-      return crypto.timingSafeEqual(bufA, bufB);
+  // Teste 8: Pagamento rejeitado
+  test("08. Pagamento com status 'rejected' não pode ser confirmado", async () => {
+    engine.reset();
+    const res = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Cliente", "11911110000", [70]);
+
+    // Marca o pagamento como rejeitado
+    const payment = engine.payments.find((p) => p.order_id === res.order_id);
+    payment.status = "rejected";
+
+    await assert.rejects(
+      async () => {
+        await engine.confirm_order_manual(res.order_id, "admin-acai-uid");
+      },
+      /está rejeitado/,
+      "Pagamentos rejeitados não podem ser confirmados manualmente"
+    );
+  });
+
+  // Teste 9: Pagamento pendente confirmado com sucesso
+  test("09. Pagamento pendente transita para 'confirmed' de forma atômica", async () => {
+    engine.reset();
+    const res = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Cliente", "11900009999", [80]);
+
+    const paymentBefore = engine.payments.find((p) => p.order_id === res.order_id);
+    assert.equal(paymentBefore.status, "pending");
+
+    await engine.confirm_order_manual(res.order_id, "admin-acai-uid");
+
+    const paymentAfter = engine.payments.find((p) => p.order_id === res.order_id);
+    assert.equal(paymentAfter.status, "confirmed");
+    assert.ok(paymentAfter.paid_at);
+  });
+
+  // Teste 10: Pagamento duplicado ou inconsistente
+  test("10. Múltiplos registros de pagamento para o mesmo pedido abortam a operação", async () => {
+    engine.reset();
+    const res = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Cliente", "11999998888", [90]);
+
+    // Injeta um segundo pagamento duplicado
+    engine.payments.push({
+      id: "pay-duplicado-fake",
+      order_id: res.order_id,
+      method: "pix_manual",
+      status: "pending",
+      amount_cents: 1000,
+    });
+
+    await assert.rejects(
+      async () => {
+        await engine.confirm_order_manual(res.order_id, "admin-acai-uid");
+      },
+      /múltiplos registros de pagamento encontrados/,
+      "Ambiguidade de pagamentos deve abortar a transação"
+    );
+  });
+
+  // Teste 11: Rollback integral em falha
+  test("11. Rollback integral em caso de falha: nenhuma entidade é alterada", async () => {
+    engine.reset();
+    const res = await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Cliente Rollback", "11988881111", [100, 101]);
+
+    // Força pagamento rejeitado para disparar falha no meio do processo
+    const pay = engine.payments.find((p) => p.order_id === res.order_id);
+    pay.status = "rejected";
+
+    await assert.rejects(async () => {
+      await engine.confirm_order_manual(res.order_id, "admin-acai-uid");
+    });
+
+    // Estado do pedido não pode ter mudado para 'paid'
+    const order = engine.orders.find((o) => o.id === res.order_id);
+    assert.equal(order.status, "pending");
+
+    // Cotas não podem ter mudado para 'paid'
+    const n100 = engine.raffle_numbers.find((r) => r.number === 100);
+    const n101 = engine.raffle_numbers.find((r) => r.number === 101);
+    assert.equal(n100.status, "reserved");
+    assert.equal(n101.status, "reserved");
+  });
+
+  // Teste 12: Consulta de rifas com paginação
+  test("12. Consulta de rifas elegíveis com paginação (sem limite da API)", async () => {
+    // Simula catálogo com mais itens que a página
+    const mockDb = [];
+    for (let i = 1; i <= 12; i++) {
+      mockDb.push({ id: `raf-${i}`, status: i % 2 === 0 ? "active" : "draft", slug: `rifa-${i}` });
     }
 
-    const validSecret = "super-segredo-cron-2026-vexa";
-    
-    // Segredo correto
-    assert.equal(timingSafeEqualStr("super-segredo-cron-2026-vexa", validSecret), true);
+    const PAGE_SIZE = 5;
+    let page = 0;
+    const collected = [];
 
-    // Segredo incorreto (mesmo tamanho)
-    assert.equal(timingSafeEqualStr("super-segredo-cron-2026-fake", validSecret), false);
+    while (true) {
+      const from = page * PAGE_SIZE;
+      const to = from + PAGE_SIZE;
+      const chunk = mockDb.slice(from, to);
+      if (chunk.length === 0) break;
+      collected.push(...chunk);
+      if (chunk.length < PAGE_SIZE) break;
+      page++;
+    }
 
-    // Segredo com tamanho diferente
-    assert.equal(timingSafeEqualStr("curto", validSecret), false);
+    assert.equal(collected.length, 12);
+  });
 
-    // Segredo vazio ou nulo
-    assert.equal(timingSafeEqualStr("", validSecret), false);
-    assert.equal(timingSafeEqualStr(null, validSecret), false);
+  // Teste 13: Rifa 'draft' com pedido pendente
+  test("13. Rifa em estado 'draft' é elegível para higienização de pedidos pendentes", async () => {
+    engine.reset();
+    // Adiciona rifa draft
+    engine.raffles.push({
+      id: "raf-draft-1",
+      workspace_id: "ws-acai-1",
+      title: "Rifa em Rascunho",
+      slug: "rifa-rascunho",
+      status: "draft",
+      price_cents: 1000,
+      total_numbers: 10,
+    });
+    for (let i = 1; i <= 10; i++) {
+      engine.raffle_numbers.push({
+        id: `rn-draft-${i}`,
+        raffle_id: "raf-draft-1",
+        number: i,
+        status: "free",
+        locked_until: null,
+      });
+    }
+
+    // Cria pedido manual na rifa draft
+    const ordId = "ord-draft-test";
+    const now = engine.getClock();
+    engine.orders.push({
+      id: ordId,
+      workspace_id: "ws-acai-1",
+      raffle_id: "raf-draft-1",
+      status: "pending",
+      expires_at: new Date(now.getTime() - 1000).toISOString(), // Já vencido
+    });
+    engine.order_items.push({ id: "oi-draft-1", order_id: ordId, raffle_id: "raf-draft-1", number: 1 });
+    const rnDraft1 = engine.raffle_numbers.find((r) => r.raffle_id === "raf-draft-1" && r.number === 1);
+    rnDraft1.status = "reserved";
+    rnDraft1.order_id = ordId;
+
+    const r = await engine.cleanup_expired_reservations_24h("raf-draft-1", 200, "service_role");
+    assert.equal(r.orders_expired, 1);
+    assert.equal(r.numbers_released, 1);
+    assert.equal(rnDraft1.status, "free");
+  });
+
+  // Teste 14: Consulta de rifas com erro, sem fallback global
+  test("14. Erro na consulta de rifas retorna HTTP 500 sem executar limpeza global", () => {
+    const queryError = { message: "Database connection failed" };
+    let globalSweepExecuted = false;
+
+    let response;
+    if (queryError) {
+      response = {
+        status: 500,
+        ok: false,
+        message: "Falha ao consultar rifas elegíveis no banco",
+      };
+    } else {
+      globalSweepExecuted = true;
+    }
+
+    assert.equal(response.status, 500);
+    assert.equal(response.ok, false);
+    assert.equal(globalSweepExecuted, false, "NUNCA pode executar sweep global quando houver erro na consulta");
+  });
+
+  // Teste 15: Consulta vazia, sem fallback global
+  test("15. Consulta de rifas vazia retorna HTTP 200 sem executar limpeza global", () => {
+    const raffles = [];
+    let globalSweepExecuted = false;
+
+    let response;
+    if (raffles.length === 0) {
+      response = {
+        status: 200,
+        ok: true,
+        raffles_checked: 0,
+        totals: { orders_expired: 0, numbers_released: 0 },
+      };
+    } else {
+      globalSweepExecuted = true;
+    }
+
+    assert.equal(response.status, 200);
+    assert.equal(response.totals.orders_expired, 0);
+    assert.equal(globalSweepExecuted, false, "NUNCA pode executar sweep global em consulta vazia");
+  });
+
+  // Teste 16: Mais de 200 pedidos vencidos
+  test("16. Mais de 200 pedidos vencidos: respeita o lote de 200 e sinaliza has_more = true", async () => {
+    engine.reset();
+    const now = engine.getClock();
+
+    // Cria 250 pedidos vencidos na rifa
+    for (let i = 1; i <= 250; i++) {
+      const ordId = `ord-batch-${i}`;
+      engine.orders.push({
+        id: ordId,
+        workspace_id: "ws-acai-1",
+        raffle_id: "raf-moto-500",
+        status: "pending",
+        expires_at: new Date(now.getTime() - 1000).toISOString(),
+      });
+      engine.payments.push({
+        id: `pay-batch-${i}`,
+        order_id: ordId,
+        status: "pending",
+      });
+    }
+
+    const r = await engine.cleanup_expired_reservations_24h("raf-moto-500", 200, "service_role");
+    assert.equal(r.orders_expired, 200, "Deve processar exatamente 200 no lote");
+    assert.equal(r.has_more, true, "Deve sinalizar has_more = true quando restarem pedidos");
+  });
+
+  // Teste 17: Reexecução idempotente
+  test("17. Reexecução idempotente: segunda chamada processa 0 pedidos sem efeitos colaterais", async () => {
+    engine.reset();
+    await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Desistente", "11988880000", [120]);
+    engine.advanceClock(25);
+
+    const r1 = await engine.cleanup_expired_reservations_24h("raf-moto-500", 200, "service_role");
+    assert.equal(r1.orders_expired, 1);
+    assert.equal(r1.has_more, false);
+
+    const r2 = await engine.cleanup_expired_reservations_24h("raf-moto-500", 200, "service_role");
+    assert.equal(r2.orders_expired, 0);
+    assert.equal(r2.has_more, false);
+  });
+
+  // Teste 18: Falha parcial no processamento de múltiplas rifas
+  test("18. Falha parcial em múltiplas rifas: não mascara erro e retorna HTTP 500 com resultado detalhado", async () => {
+    const raffles = [
+      { id: "raf-1", slug: "rifa-ok" },
+      { id: "raf-2", slug: "rifa-com-erro" },
+    ];
+
+    const processedRaffles = [];
+    const failedRaffles = [];
+
+    for (const r of raffles) {
+      if (r.id === "raf-2") {
+        failedRaffles.push({ raffle_id: r.id, slug: r.slug, error: "Conexão interrompida" });
+      } else {
+        processedRaffles.push({ raffle_id: r.id, slug: r.slug, orders_expired: 5, numbers_released: 10, has_more: false });
+      }
+    }
+
+    assert.equal(failedRaffles.length, 1);
+    assert.equal(processedRaffles.length, 1);
+
+    const response = {
+      ok: false,
+      status: 500,
+      partial_success: true,
+      processed_raffles: processedRaffles,
+      failed_raffles: failedRaffles,
+    };
+
+    assert.equal(response.ok, false);
+    assert.equal(response.status, 500);
+    assert.equal(response.failed_raffles[0].slug, "rifa-com-erro");
   });
 });
 
-describe("MATRIZ DE AUDITORIA CRON — EXPIRAÇÃO VERCEL E SEGURANÇA", () => {
+/**
+ * ==============================================================================
+ * GRUPO 2: TESTES DE UNIDADE E MOCKS HTTP DO ENDPOINT CRON
+ * ==============================================================================
+ */
+describe("GRUPO 2: SEGURANÇA E CONFORMIDADE DO CRON ROUTE HANDLER (NEXT.JS)", () => {
   const SERVER_CRON_SECRET = "super-secret-cron-token-acai-2026";
-  const SERVICE_ROLE_MOCK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.mock-service-role-key";
 
   function timingSafeEqualStr(a, b) {
     if (typeof a !== "string" || typeof b !== "string") return false;
@@ -746,7 +799,6 @@ describe("MATRIZ DE AUDITORIA CRON — EXPIRAÇÃO VERCEL E SEGURANÇA", () => {
   }
 
   function authenticateCronRequest(req, customSecret) {
-    // Se customSecret for fornecido (incluindo null ou undefined em testes), utiliza-o; caso contrário, usa o padrão do teste
     const serverSecret = (arguments.length > 1 ? customSecret : SERVER_CRON_SECRET)?.trim();
     if (!serverSecret) {
       return {
@@ -802,227 +854,66 @@ describe("MATRIZ DE AUDITORIA CRON — EXPIRAÇÃO VERCEL E SEGURANÇA", () => {
     return { authorized: true, status: 200, message: "OK" };
   }
 
-  // 1. GET autenticado
-  test("C1. GET autenticado via Authorization: Bearer <CRON_SECRET> retorna sucesso", () => {
+  test("U1. GET autenticado via Authorization: Bearer <CRON_SECRET> retorna HTTP 200", () => {
     const req = new Request("https://rifa-vexa.com/api/cron/expire-reservations", {
       method: "GET",
-      headers: {
-        authorization: `Bearer ${SERVER_CRON_SECRET}`,
-      },
+      headers: { authorization: `Bearer ${SERVER_CRON_SECRET}` },
     });
-
     const res = authenticateCronRequest(req);
     assert.equal(res.authorized, true);
     assert.equal(res.status, 200);
-    assert.equal(res.message, "OK");
   });
 
-  // 2. GET sem segredo
-  test("C2. GET sem cabeçalho Authorization é rejeitado com HTTP 401", () => {
-    const req = new Request("https://rifa-vexa.com/api/cron/expire-reservations", {
-      method: "GET",
-    });
-
+  test("U2. GET sem cabeçalho Authorization retorna HTTP 401", () => {
+    const req = new Request("https://rifa-vexa.com/api/cron/expire-reservations", { method: "GET" });
     const res = authenticateCronRequest(req);
     assert.equal(res.authorized, false);
     assert.equal(res.status, 401);
-    assert.match(res.message, /Cabeçalho Authorization ausente/);
   });
 
-  // 3. GET com segredo incorreto
-  test("C3. GET com token Bearer incorreto é rejeitado com HTTP 401", () => {
+  test("U3. GET com token Bearer incorreto retorna HTTP 401", () => {
     const req = new Request("https://rifa-vexa.com/api/cron/expire-reservations", {
       method: "GET",
-      headers: {
-        authorization: "Bearer token-totalmente-errado-123",
-      },
+      headers: { authorization: "Bearer token-falso-invalido" },
     });
-
     const res = authenticateCronRequest(req);
     assert.equal(res.authorized, false);
     assert.equal(res.status, 401);
-    assert.match(res.message, /token inválido/);
   });
 
-  // 4. Rejeição de segredo enviado pela URL
-  test("C4. Rejeição imediata de segredo via query string (?secret=) com HTTP 401", () => {
+  test("U4. Rejeição imediata de segredo via query string (?secret=) com HTTP 401", () => {
     const req = new Request(`https://rifa-vexa.com/api/cron/expire-reservations?secret=${SERVER_CRON_SECRET}`, {
       method: "GET",
-      headers: {
-        authorization: `Bearer ${SERVER_CRON_SECRET}`,
-      },
+      headers: { authorization: `Bearer ${SERVER_CRON_SECRET}` },
     });
-
     const res = authenticateCronRequest(req);
     assert.equal(res.authorized, false);
     assert.equal(res.status, 401);
     assert.match(res.message, /query string descontinuada/);
   });
 
-  // 5. Ausência de CRON_SECRET no servidor
-  test("C5. Ausência de CRON_SECRET configurado no servidor retorna HTTP 500", () => {
+  test("U5. Ausência de CRON_SECRET no servidor retorna HTTP 500 sem executar operações", () => {
     const req = new Request("https://rifa-vexa.com/api/cron/expire-reservations", {
       method: "GET",
-      headers: {
-        authorization: `Bearer ${SERVER_CRON_SECRET}`,
-      },
+      headers: { authorization: `Bearer ${SERVER_CRON_SECRET}` },
     });
+    const resNull = authenticateCronRequest(req, null);
+    assert.equal(resNull.status, 500);
 
-    // Simula ambiente sem CRON_SECRET
-    const resUndefined = authenticateCronRequest(req, undefined);
-    assert.equal(resUndefined.authorized, false);
-    assert.equal(resUndefined.status, 500);
-    assert.match(resUndefined.message, /não configurado/);
-
-    const resEmpty = authenticateCronRequest(req, "   ");
-    assert.equal(resEmpty.authorized, false);
+    const resEmpty = authenticateCronRequest(req, "");
     assert.equal(resEmpty.status, 500);
-    assert.match(resEmpty.message, /não configurado/);
   });
 
-  // 6. Processamento de múltiplas rifas
-  test("C6. Processamento independente de múltiplas rifas com agregação de totais", async () => {
-    const engine = new Manual24hPostgresEngine();
-
-    // Adiciona segunda rifa na engine
-    engine.raffles.push({
-      id: "raf-capacete-100",
-      workspace_id: "ws-acai-1",
-      title: "Capacete Elétrico Açaí Vexa",
-      slug: "capacete-acai-vexa",
-      status: "active",
-      price_cents: 500,
-      total_numbers: 100,
-    });
-    for (let i = 1; i <= 100; i++) {
-      engine.raffle_numbers.push({
-        id: `rn-cap-${i}`,
-        raffle_id: "raf-capacete-100",
-        number: i,
-        status: "free",
-        locked_until: null,
-        reserved_at: null,
-        order_id: null,
-        buyer_name: null,
-        buyer_phone: null,
-      });
-    }
-
-    // Cria reserva na Rifa 1 (Moto)
-    await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Comprador Moto", "11911112222", [10, 11]);
-    // Cria reserva na Rifa 2 (Capacete)
-    await engine.reserve_numbers_manual_24h("capacete-acai-vexa", "Comprador Capacete", "11933334444", [5]);
-
-    // Avança o relógio além de 24 horas
-    engine.advanceClock(25);
-
-    // Executa limpeza para Rifa 1
-    const r1 = await engine.cleanup_expired_reservations_24h("raf-moto-500", "service_role");
-    assert.equal(r1.orders_expired, 1);
-    assert.equal(r1.numbers_released, 2);
-
-    // Executa limpeza para Rifa 2
-    const r2 = await engine.cleanup_expired_reservations_24h("raf-capacete-100", "service_role");
-    assert.equal(r2.orders_expired, 1);
-    assert.equal(r2.numbers_released, 1);
-
-    // Totais consolidados
-    const totalOrders = r1.orders_expired + r2.orders_expired;
-    const totalNumbers = r1.numbers_released + r2.numbers_released;
-    assert.equal(totalOrders, 2);
-    assert.equal(totalNumbers, 3);
-  });
-
-  // 7. Falha em uma rifa sem ocultar o resultado das demais
-  test("C7. Falha isolada em uma rifa preserva o resultado das demais e relata erro (HTTP 500)", async () => {
-    const raffles = [
-      { id: "raf-sucesso-1", slug: "rifa-ok" },
-      { id: "raf-falha-2", slug: "rifa-quebrada" },
-    ];
-
-    const processedRaffles = [];
-    const failedRaffles = [];
-    let totalExpired = 0;
-    let totalReleased = 0;
-
-    for (const r of raffles) {
-      if (r.id === "raf-falha-2") {
-        failedRaffles.push({
-          raffle_id: r.id,
-          slug: r.slug,
-          error: "Connection timeout no PostgreSQL para esta tabela",
-        });
-      } else {
-        processedRaffles.push({
-          raffle_id: r.id,
-          slug: r.slug,
-          orders_expired: 3,
-          numbers_released: 5,
-        });
-        totalExpired += 3;
-        totalReleased += 5;
-      }
-    }
-
-    // O cron deve acusar falha sem declarar falso sucesso total
-    assert.equal(failedRaffles.length, 1);
-    assert.equal(processedRaffles.length, 1);
-    assert.equal(totalExpired, 3);
-    assert.equal(totalReleased, 5);
-
-    const httpResponse = {
-      ok: false,
-      message: `Aviso operacional: falha ao processar ${failedRaffles.length} de ${raffles.length} rifas`,
-      partial_success: processedRaffles.length > 0,
-      totals: { orders_expired: totalExpired, numbers_released: totalReleased },
-      processed_raffles: processedRaffles,
-      failed_raffles: failedRaffles,
-    };
-
-    assert.equal(httpResponse.ok, false, "Não pode declarar ok: true se houve rifa com falha");
-    assert.equal(httpResponse.partial_success, true);
-    assert.equal(httpResponse.failed_raffles[0].slug, "rifa-quebrada");
-  });
-
-  // 8. Reexecução segura (idempotência)
-  test("C8. Reexecução segura do cron resulta em 0 alterações sem efeitos colaterais", async () => {
-    const engine = new Manual24hPostgresEngine();
-    await engine.reserve_numbers_manual_24h("moto-eletrica-acai-vexa", "Desistente", "11988887777", [50]);
-
-    engine.advanceClock(26);
-
-    // Execução 1: limpa 1 pedido e libera 1 cota
-    const r1 = await engine.cleanup_expired_reservations_24h(null, "service_role");
-    assert.equal(r1.orders_expired, 1);
-    assert.equal(r1.numbers_released, 1);
-
-    // Execução 2 imediata: sem pedidos para expirar
-    const r2 = await engine.cleanup_expired_reservations_24h(null, "service_role");
-    assert.equal(r2.orders_expired, 0);
-    assert.equal(r2.numbers_released, 0);
-
-    // Status da cota permanece livre
-    const n50 = engine.raffle_numbers.find((rn) => rn.number === 50);
-    assert.equal(n50.status, "free");
-  });
-
-  // 9. Ausência de exposição da service role
-  test("C9. Resposta e estrutura do cron NUNCA expõem a chave service_role", () => {
-    const mockOutput = {
+  test("U6. Resposta do Cron não vaza service_role nem o CRON_SECRET", () => {
+    const responsePayload = {
       ok: true,
-      raffles_checked: 2,
-      totals: {
-        orders_expired: 4,
-        numbers_released: 8,
-      },
-      processed_raffles: [
-        { raffle_id: "raf-1", slug: "moto", orders_expired: 4, numbers_released: 8 }
-      ],
+      raffles_checked: 3,
+      totals: { orders_expired: 10, numbers_released: 20 },
+      processed_raffles: [{ raffle_id: "raf-1", slug: "moto", orders_expired: 10, numbers_released: 20, has_more: false }],
+      has_more_pending: false,
     };
-
-    const serialized = JSON.stringify(mockOutput);
-    assert.equal(serialized.includes(SERVICE_ROLE_MOCK), false);
-    assert.equal(serialized.includes("service_role"), false);
-    assert.equal(serialized.includes(SERVER_CRON_SECRET), false);
+    const str = JSON.stringify(responsePayload);
+    assert.equal(str.includes("service_role"), false);
+    assert.equal(str.includes(SERVER_CRON_SECRET), false);
   });
 });

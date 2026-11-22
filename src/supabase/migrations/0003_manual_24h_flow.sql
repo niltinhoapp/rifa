@@ -214,8 +214,12 @@ declare
   v_order public.orders%rowtype;
   v_payment public.payments%rowtype;
   v_confirmed_by uuid;
-  v_expected_count int;
-  v_locked_count int;
+  v_admin_role text;
+  v_expected_numbers int[];
+  v_actual_order_numbers_count int;
+  v_locked_count int := 0;
+  v_payment_count int;
+  v_num record;
   v_now timestamptz := clock_timestamp();
 begin
   -- 1. Trava o pedido com FOR UPDATE
@@ -228,14 +232,20 @@ begin
     raise exception 'Pedido não encontrado: %', p_order_id;
   end if;
 
-  -- 2. Validação estrita de autorização e identidade administrativa
+  -- 2. Validação estrita de autorização administrativa e isolamento de workspace
   if auth.uid() is not null then
     -- Chamada autenticada via Supabase Auth: identidade é estritamente vinculada a auth.uid()
-    -- Impede qualquer falsificação de identidade por meio de p_admin_id
+    -- Impede qualquer personificação por meio de p_admin_id
     v_confirmed_by := auth.uid();
 
-    if not public.is_workspace_member(v_order.workspace_id) then
-      raise exception 'Acesso não autorizado: usuário não pertence ao workspace desta rifa';
+    -- Busca o papel explícito do usuário no workspace do pedido
+    select wm.role into v_admin_role
+    from public.workspace_members wm
+    where wm.workspace_id = v_order.workspace_id
+      and wm.user_id = auth.uid();
+
+    if not found or v_admin_role not in ('owner', 'admin') then
+      raise exception 'Acesso não autorizado: usuário não possui papel administrativo neste workspace';
     end if;
   else
     -- Chamada sem auth.uid(): restrita exclusivamente ao backend com papel service_role
@@ -264,44 +274,85 @@ begin
     raise exception 'Confirmação recusada: O prazo de 24 horas deste pedido expirou em % (horário atual: %).', v_order.expires_at, v_now;
   end if;
 
-  -- 5. Validação de integridade: todos os itens cadastrados devem continuar vinculados e reservados
-  select count(*) into v_expected_count
+  -- 5. Validação de integridade: seleciona e ordena as cotas esperadas de order_items
+  select array_agg(oi.number order by oi.number asc) into v_expected_numbers
   from public.order_items oi
   where oi.order_id = v_order.id;
 
-  if v_expected_count = 0 then
+  if v_expected_numbers is null or array_length(v_expected_numbers, 1) is null or array_length(v_expected_numbers, 1) = 0 then
     raise exception 'Inconsistência estrutural: nenhum item encontrado para o pedido %', v_order.id;
   end if;
 
-  -- 6. Bloqueia deterministicamente as cotas associadas e valida disponibilidade integral
-  select count(*) into v_locked_count
+  -- Garante que não existem cotas adicionais no banco vinculadas a este pedido fora de order_items
+  select count(*) into v_actual_order_numbers_count
   from public.raffle_numbers rn
-  where rn.order_id = v_order.id
-    and rn.status = 'reserved'
-    and rn.locked_until > v_now
-  order by rn.number
-  for update;
+  where rn.order_id = v_order.id;
 
-  if v_locked_count <> v_expected_count then
-    raise exception 'Confirmação recusada: nem todas as cotas continuam reservadas ativamente para este pedido (esperado: %, reservadas ativas: %).', v_expected_count, v_locked_count;
+  if v_actual_order_numbers_count <> array_length(v_expected_numbers, 1) then
+    raise exception 'Confirmação recusada: divergência na quantidade de cotas vinculadas ao pedido (vinculadas: %, itens esperados: %)', v_actual_order_numbers_count, array_length(v_expected_numbers, 1);
   end if;
 
-  -- 7. Localiza e trava o registro de pagamento associado
+  -- 6. Bloqueia as cotas individualmente (SEM agregação com FOR UPDATE) em ordem crescente
+  v_locked_count := 0;
+  for v_num in
+    select rn.id, rn.number, rn.status, rn.locked_until, rn.order_id
+    from public.raffle_numbers rn
+    where rn.raffle_id = v_order.raffle_id
+      and rn.number = any(v_expected_numbers)
+    order by rn.number asc
+    for update
+  loop
+    if v_num.order_id is distinct from v_order.id then
+      raise exception 'Confirmação recusada: cota % não pertence ao pedido % (pertence a: %)', v_num.number, v_order.id, v_num.order_id;
+    end if;
+
+    if v_num.status <> 'reserved' then
+      raise exception 'Confirmação recusada: cota % está com status % (esperado: reserved)', v_num.number, v_num.status;
+    end if;
+
+    if v_num.locked_until is null or v_num.locked_until <= v_now then
+      raise exception 'Confirmação recusada: a reserva da cota % expirou em %', v_num.number, v_num.locked_until;
+    end if;
+
+    v_locked_count := v_locked_count + 1;
+  end loop;
+
+  if v_locked_count <> array_length(v_expected_numbers, 1) then
+    raise exception 'Confirmação recusada: nem todas as cotas esperadas foram bloqueadas (esperado: %, bloqueadas: %)', array_length(v_expected_numbers, 1), v_locked_count;
+  end if;
+
+  -- 7. Validação de cardinalidade e estado do pagamento
+  select count(*) into v_payment_count
+  from public.payments p
+  where p.order_id = v_order.id;
+
+  if v_payment_count = 0 then
+    raise exception 'Inconsistência financeira: nenhum registro de pagamento encontrado para o pedido %', v_order.id;
+  end if;
+
+  if v_payment_count > 1 then
+    raise exception 'Inconsistência financeira: múltiplos registros de pagamento encontrados para o pedido % (total: %)', v_order.id, v_payment_count;
+  end if;
+
+  -- Trava o pagamento único com FOR UPDATE
   select * into v_payment
   from public.payments p
   where p.order_id = v_order.id
-  order by p.created_at desc
-  limit 1
   for update;
 
-  if not found then
-    raise exception 'Inconsistência financeira: nenhum registro de pagamento associado ao pedido %', v_order.id;
+  if v_payment.status = 'rejected' then
+    raise exception 'Confirmação recusada: o pagamento associado ao pedido % está rejeitado', v_order.id;
+  end if;
+
+  if v_payment.status <> 'pending' then
+    raise exception 'Confirmação recusada: status de pagamento inválido para confirmação manual: % (esperado: pending)', v_payment.status;
   end if;
 
   -- 8. ATUALIZAÇÃO ATÔMICA CONJUNTA (TRI-PILAR)
   -- A) Pagamento: status 'confirmed' (enum payment_status)
   update public.payments
   set status = 'confirmed',
+      paid_at = v_now,
       confirmed_at = v_now,
       confirmed_by = v_confirmed_by,
       updated_at = v_now
@@ -333,11 +384,13 @@ grant execute on function public.confirm_order_manual(uuid, uuid) to authenticat
 -- 4. RPC: HIGIENIZAÇÃO SEGURA DE RESERVAS EXPIRADAS APÓS 24 HORAS
 -- ==============================================================================
 create or replace function public.cleanup_expired_reservations_24h(
-  p_raffle_id uuid default null
+  p_raffle_id uuid default null,
+  p_batch_size int default 200
 )
 returns table(
   orders_expired int,
-  numbers_released int
+  numbers_released int,
+  has_more boolean
 )
 language plpgsql
 security definer
@@ -348,11 +401,17 @@ declare
   v_orders int := 0;
   v_nums int := 0;
   v_released int;
+  v_has_more boolean := false;
   v_now timestamptz := clock_timestamp();
+  v_effective_batch int := coalesce(p_batch_size, 200);
 begin
   -- Exclusividade de Execução: apenas o backend administrativo (service_role) pode rodar a higienização
   if current_setting('request.jwt.claim.role', true) <> 'service_role' and current_user <> 'service_role' then
     raise exception 'Acesso restrito ao backend administrativo (service_role)';
+  end if;
+
+  if v_effective_batch < 1 or v_effective_batch > 1000 then
+    v_effective_batch := 200;
   end if;
 
   for v_rec in
@@ -363,7 +422,7 @@ begin
       and (p_raffle_id is null or raffle_id = p_raffle_id)
     order by expires_at asc
     for update skip locked
-    limit 200
+    limit v_effective_batch
   loop
     -- Proteção Financeira Absoluta: NUNCA expira se houver pagamento confirmado
     if not exists (
@@ -393,10 +452,21 @@ begin
     end if;
   end loop;
 
-  return query select v_orders, v_nums;
+  -- Avalia se ainda restam pedidos expirados não processados neste lote
+  if v_orders >= v_effective_batch then
+    select exists (
+      select 1
+      from public.orders
+      where status = 'pending'
+        and expires_at <= v_now
+        and (p_raffle_id is null or raffle_id = p_raffle_id)
+    ) into v_has_more;
+  end if;
+
+  return query select v_orders, v_nums, v_has_more;
 end;
 $$;
 
-revoke all on function public.cleanup_expired_reservations_24h(uuid) from public;
-revoke all on function public.cleanup_expired_reservations_24h(uuid) from anon, authenticated;
-grant execute on function public.cleanup_expired_reservations_24h(uuid) to service_role;
+revoke all on function public.cleanup_expired_reservations_24h(uuid, int) from public;
+revoke all on function public.cleanup_expired_reservations_24h(uuid, int) from anon, authenticated;
+grant execute on function public.cleanup_expired_reservations_24h(uuid, int) to service_role;

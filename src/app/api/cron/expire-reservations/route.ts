@@ -118,74 +118,73 @@ async function handleCron(req: Request): Promise<NextResponse> {
     );
   }
 
-  // 1. Busca todas as rifas ativas ou finalizadas que possam ter reservas pendentes
-  const { data: raffles, error: rafflesErr } = await sbAdmin
-    .from("raffles")
-    .select("id, title, slug, status")
-    .in("status", ["active", "paused", "ended"]);
+  // 1. Busca todas as rifas elegíveis via paginação determinística (sem limite da API)
+  // Inclui 'draft', 'active', 'paused' e 'ended' para cobrir qualquer pedido pendente
+  const PAGE_SIZE = 500;
+  let page = 0;
+  const allRaffles: Array<{ id: string; status: string; slug: string }> = [];
 
-  if (rafflesErr) {
-    // Falha operacional ao consultar rifas: tenta sweep global via RPC e relata erro
-    const { data: fallbackData, error: fallbackErr } = await sbAdmin.rpc(
-      "cleanup_expired_reservations_24h",
-      { p_raffle_id: null }
-    );
+  while (true) {
+    const from = page * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
 
-    if (fallbackErr) {
+    const { data: pageData, error: pageErr } = await sbAdmin
+      .from("raffles")
+      .select("id, status, slug")
+      .in("status", ["draft", "active", "paused", "ended"])
+      .order("id", { ascending: true })
+      .range(from, to);
+
+    // REGRA DE SEGURANÇA: Erro na consulta NUNCA executa limpeza global de fallback
+    if (pageErr) {
       return NextResponse.json(
         {
           ok: false,
-          message: "Falha geral ao processar limpeza de reservas",
-          detail: fallbackErr.message,
+          message: "Falha ao consultar rifas elegíveis no banco",
+          detail: pageErr.message,
         },
         { status: 500 }
       );
     }
 
-    const fbRow = Array.isArray(fallbackData) ? fallbackData[0] : fallbackData;
-    return NextResponse.json({
-      ok: true,
-      mode: "global_sweep_fallback",
-      totals: {
-        orders_expired: fbRow?.orders_expired ?? 0,
-        numbers_released: fbRow?.numbers_released ?? 0,
-      },
-    });
-  }
-
-  // 2. Se não houver rifas cadastradas, executa sweep global de prevenção
-  if (!raffles || raffles.length === 0) {
-    const { data: emptyData, error: emptyErr } = await sbAdmin.rpc(
-      "cleanup_expired_reservations_24h",
-      { p_raffle_id: null }
-    );
-
-    if (emptyErr) {
-      return NextResponse.json(
-        { ok: false, message: emptyErr.message },
-        { status: 500 }
-      );
+    if (!pageData || pageData.length === 0) {
+      break;
     }
 
-    const row = Array.isArray(emptyData) ? emptyData[0] : emptyData;
+    allRaffles.push(...pageData);
+
+    if (pageData.length < PAGE_SIZE) {
+      break;
+    }
+
+    page++;
+  }
+
+  // 2. Se a consulta for vazia (zero rifas), retorna sucesso limpo sem executar limpeza global
+  if (allRaffles.length === 0) {
     return NextResponse.json({
       ok: true,
       raffles_checked: 0,
       totals: {
-        orders_expired: row?.orders_expired ?? 0,
-        numbers_released: row?.numbers_released ?? 0,
+        orders_expired: 0,
+        numbers_released: 0,
       },
+      processed_raffles: [],
+      has_more_pending: false,
     });
   }
 
-  // 3. Processamento individualizado por rifa elegível
+  // 3. Processamento individualizado por rifa elegível (lotes de até 200 pedidos por execução)
   let totalOrdersExpired = 0;
   let totalNumbersReleased = 0;
+  let hasMorePending = false;
+
   const processedRaffles: Array<{
     raffle_id: string;
     slug: string;
     orders_expired: number;
     numbers_released: number;
+    has_more: boolean;
   }> = [];
 
   const failedRaffles: Array<{
@@ -194,10 +193,11 @@ async function handleCron(req: Request): Promise<NextResponse> {
     error: string;
   }> = [];
 
-  for (const raffle of raffles) {
+  for (const raffle of allRaffles) {
     try {
       const { data, error } = await sbAdmin.rpc("cleanup_expired_reservations_24h", {
         p_raffle_id: raffle.id,
+        p_batch_size: 200,
       });
 
       if (error) {
@@ -210,15 +210,20 @@ async function handleCron(req: Request): Promise<NextResponse> {
         const res = Array.isArray(data) ? data[0] : data;
         const exp = res?.orders_expired ?? 0;
         const rel = res?.numbers_released ?? 0;
+        const more = Boolean(res?.has_more);
 
         totalOrdersExpired += exp;
         totalNumbersReleased += rel;
+        if (more) {
+          hasMorePending = true;
+        }
 
         processedRaffles.push({
           raffle_id: raffle.id,
           slug: raffle.slug,
           orders_expired: exp,
           numbers_released: rel,
+          has_more: more,
         });
       }
     } catch (err: any) {
@@ -235,7 +240,7 @@ async function handleCron(req: Request): Promise<NextResponse> {
     return NextResponse.json(
       {
         ok: false,
-        message: `Aviso operacional: falha ao processar ${failedRaffles.length} de ${raffles.length} rifas`,
+        message: `Aviso operacional: falha ao processar ${failedRaffles.length} de ${allRaffles.length} rifas`,
         partial_success: processedRaffles.length > 0,
         totals: {
           orders_expired: totalOrdersExpired,
@@ -243,6 +248,7 @@ async function handleCron(req: Request): Promise<NextResponse> {
         },
         processed_raffles: processedRaffles,
         failed_raffles: failedRaffles,
+        has_more_pending: hasMorePending,
       },
       { status: 500 }
     );
@@ -251,12 +257,13 @@ async function handleCron(req: Request): Promise<NextResponse> {
   // 5. Sucesso completo
   return NextResponse.json({
     ok: true,
-    raffles_checked: raffles.length,
+    raffles_checked: allRaffles.length,
     totals: {
       orders_expired: totalOrdersExpired,
       numbers_released: totalNumbersReleased,
     },
     processed_raffles: processedRaffles,
+    has_more_pending: hasMorePending,
   });
 }
 
