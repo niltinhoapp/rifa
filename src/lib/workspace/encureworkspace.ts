@@ -1,7 +1,7 @@
 import { supabaseServer } from "@/lib/supabase/server";
 
 export async function ensureWorkspace() {
-  const sb = supabaseServer();
+  const sb = await supabaseServer();
 
   const { data: u } = await sb.auth.getUser();
   const user = u.user;

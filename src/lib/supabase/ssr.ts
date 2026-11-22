@@ -55,7 +55,7 @@ export async function supabaseSSR(req?: Request) {
       getAll() {
         return store.getAll();
       },
-      setAll(cookiesToSet) {
+      setAll(cookiesToSet: Array<{ name: string; value: string; options?: any }>) {
         // Server Actions podem precisar persistir refresh token
         cookiesToSet.forEach(({ name, value, options }) => {
           store.set({ name, value, ...options });
