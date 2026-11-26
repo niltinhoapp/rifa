@@ -11,7 +11,7 @@ type PageProps = {
 
 const DAHORA_SLUG = "dahora-motos-eletricas";
 const DAHORA_URL = "https://rifa-es8i.onrender.com/r/dahora-motos-eletricas";
-const R20_PRIME_IMAGE = "https://rifa-es8i.onrender.com/api/og/r20";
+const R20_PRIME_IMAGE = "https://rifa-es8i.onrender.com/imagens/R-20.jpeg";
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { slug } = await params;
@@ -37,8 +37,6 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
       images: [
         {
           url: R20_PRIME_IMAGE,
-          width: 720,
-          height: 875,
           alt: "Moto Elétrica R20 PRIME da Dahora Motos Elétricas",
         },
       ],
