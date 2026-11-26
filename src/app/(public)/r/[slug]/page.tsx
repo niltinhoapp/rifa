@@ -1,6 +1,9 @@
 import { supabaseServer } from "@/lib/supabase/server";
 import RaffleClient from "./raffle-client";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 type PageProps = {
   params: Promise<{ slug: string }>;
 };
@@ -16,18 +19,18 @@ export default async function RifaPage({ params }: PageProps) {
     .eq("slug", slug)
     .single();
 
-if (raffleErr || !raffle) {
-  return (
-    <main className="max-w-3xl mx-auto p-6">
-      <h1 className="text-xl font-bold">Rifa não encontrada</h1>
-      <pre className="mt-3 text-xs whitespace-pre-wrap rounded-xl border p-3">
-        slug: {slug}{"\n"}
-        raffleErr: {raffleErr ? JSON.stringify(raffleErr, null, 2) : "null"}{"\n"}
-        raffle: {raffle ? "FOUND" : "null"}
-      </pre>
-    </main>
-  );
-}
+  if (raffleErr || !raffle) {
+    return (
+      <main className="max-w-3xl mx-auto p-6">
+        <h1 className="text-xl font-bold">Rifa não encontrada</h1>
+        <pre className="mt-3 text-xs whitespace-pre-wrap rounded-xl border p-3">
+          slug: {slug}{"\n"}
+          raffleErr: {raffleErr ? JSON.stringify(raffleErr, null, 2) : "null"}{"\n"}
+          raffle: {raffle ? "FOUND" : "null"}
+        </pre>
+      </main>
+    );
+  }
 
   const { data: numbers } = await sb
     .from("raffle_numbers")

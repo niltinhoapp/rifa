@@ -281,7 +281,7 @@ export default function RaffleClient({
               href="https://api.whatsapp.com/send?phone=5514998877886&text=Ol%C3%A1!%20Gostaria%20de%20informa%C3%A7%C3%B5es%20sobre%20a%20Rifa%20da%20Scooter%20El%C3%A9trica!"
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-600 text-white font-semibold hover:bg-emerald-500 transition shadow-sm"
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-600 text-white font-semibold hover:bg-emerald-500 transition shadow-sm"
             >
               <span>WhatsApp: (14) 99887-7886</span>
             </a>
@@ -441,7 +441,7 @@ export default function RaffleClient({
                   className="mt-1 w-full rounded-xl border border-zinc-700/80 bg-zinc-950/60 px-3.5 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
                   value={buyerPhone}
                   onChange={(e) => setBuyerPhone(e.target.value)}
-                  placeholder="(14) 99887-7886"
+                  placeholder="(14) 99999-9999"
                 />
               </div>
             </div>

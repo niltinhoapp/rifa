@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function supabaseAnon() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -18,7 +20,7 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ slug: string }> }
 ) {
-  const { slug } = await params; // ✅ Next 16: params é Promise
+  const { slug } = await params;
 
   if (!slug || slug === "undefined") {
     return NextResponse.json({ ok: false, message: "slug inválido" }, { status: 400 });
@@ -39,11 +41,6 @@ export async function GET(
     );
   }
 
-  // se quiser bloquear rifa inativa no público:
-  // if (raffle.status !== "active") {
-  //   return NextResponse.json({ ok: false, message: "Rifa inativa" }, { status: 400 });
-  // }
-
   const { data: numbers, error: nErr } = await sb
     .from("raffle_numbers")
     .select("number,status,locked_until,buyer_name")
@@ -55,5 +52,14 @@ export async function GET(
     return NextResponse.json({ ok: false, message: nErr.message }, { status: 400 });
   }
 
-  return NextResponse.json({ ok: true, numbers: numbers ?? [] });
+  return NextResponse.json(
+    { ok: true, numbers: numbers ?? [] },
+    {
+      headers: {
+        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+        Pragma: "no-cache",
+        Expires: "0",
+      },
+    }
+  );
 }
