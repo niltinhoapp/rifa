@@ -11,8 +11,8 @@ type PageProps = {
 
 const DAHORA_SLUG = "dahora-motos-eletricas";
 const DAHORA_URL = "https://rifa-es8i.onrender.com/r/dahora-motos-eletricas";
-const SCOOTER_X13_IMAGE =
-  "https://static.wixstatic.com/media/acc37b_ea46cbef3a994e9ebef21e7d2d46465b~mv2.webp";
+const R20_PRIME_IMAGE =
+  "https://static.wixstatic.com/media/acc37b_79f5e928245e4f8498b6ece85c2d8d2b~mv2.jpeg";
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { slug } = await params;
@@ -21,9 +21,9 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   // pública da Dahora; as demais rotas continuam herdando os metadados globais.
   if (slug !== DAHORA_SLUG) return {};
 
-  const title = "DAHORA MOTOS ELÉTRICAS | Concorra à Scooter X13";
+  const title = "DAHORA MOTOS ELÉTRICAS | Concorra à Moto Elétrica R20 PRIME";
   const description =
-    "Escolha seus números da sorte e concorra a uma Scooter X13. São 500 números disponíveis por R$ 25,00 cada.";
+    "Escolha seus números da sorte e concorra a uma Moto Elétrica R20 PRIME. São 500 números disponíveis por R$ 25,00 cada.";
 
   return {
     title,
@@ -37,10 +37,10 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
       description,
       images: [
         {
-          url: SCOOTER_X13_IMAGE,
+          url: R20_PRIME_IMAGE,
           width: 500,
           height: 477,
-          alt: "Scooter elétrica X13 da Dahora Motos Elétricas",
+          alt: "Moto Elétrica R20 PRIME da Dahora Motos Elétricas",
         },
       ],
     },
@@ -48,7 +48,7 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
       card: "summary_large_image",
       title,
       description,
-      images: [SCOOTER_X13_IMAGE],
+      images: [R20_PRIME_IMAGE],
     },
   };
 }
