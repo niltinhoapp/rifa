@@ -12,7 +12,7 @@ export default async function RifaPage({ params }: PageProps) {
 
   const { data: raffle, error: raffleErr } = await sb
     .from("raffles")
-    .select("id,title,description,price_cents,total_numbers,slug,status,reserve_minutes")
+    .select("id,title,description,price_cents,total_numbers,slug,status,reserve_minutes,payment_instructions,prize_title,prize_description")
     .eq("slug", slug)
     .single();
 
@@ -33,6 +33,7 @@ if (raffleErr || !raffle) {
     .from("raffle_numbers")
     .select("number,status,locked_until,buyer_name")
     .eq("raffle_id", raffle.id)
+    .eq("status", "free")
     .order("number", { ascending: true });
 
   return (
@@ -44,6 +45,9 @@ if (raffleErr || !raffle) {
         priceCents: raffle.price_cents,
         totalNumbers: raffle.total_numbers,
         reserveMinutes: raffle.reserve_minutes,
+        paymentInstructions: raffle.payment_instructions,
+        prizeTitle: raffle.prize_title,
+        prizeDescription: raffle.prize_description,
       }}
       numbers={numbers ?? []}
     />

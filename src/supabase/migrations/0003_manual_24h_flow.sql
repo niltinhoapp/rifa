@@ -92,7 +92,7 @@ returns table(
 )
 language plpgsql
 security definer
-set search_path = public, pg_temp
+set search_path = public, extensions, pg_temp
 as $$
 declare
   v_raffle public.raffles%rowtype;
@@ -167,7 +167,7 @@ begin
 
   -- 6. Totalização financeira e geração do token público
   v_total := v_raffle.price_cents * array_length(v_sorted_numbers, 1);
-  v_token := encode(gen_random_bytes(16), 'hex');
+  v_token := replace(gen_random_uuid()::text, '-', '');
 
   -- 7. Insere o pedido com prazo de 24 horas fixo em UTC
   insert into public.orders (
@@ -252,7 +252,7 @@ returns table(
 )
 language plpgsql
 security definer
-set search_path = public, pg_temp
+set search_path = public, extensions, pg_temp
 as $$
 declare
   v_order public.orders%rowtype;
@@ -441,7 +441,7 @@ returns table(
 )
 language plpgsql
 security definer
-set search_path = public, pg_temp
+set search_path = public, extensions, pg_temp
 as $$
 declare
   v_rec record;

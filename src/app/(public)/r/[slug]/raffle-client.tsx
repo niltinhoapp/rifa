@@ -7,8 +7,11 @@ type Raffle = {
   description: string | null;
   slug: string;
   priceCents: number;
-  totalNumbers: number; // aqui será 100
+  totalNumbers: number;
   reserveMinutes: number;
+  paymentInstructions?: string | null;
+  prizeTitle?: string | null;
+  prizeDescription?: string | null;
 };
 
 type RaffleNumber = {
@@ -31,10 +34,6 @@ function padNumber(n: number, total: number = 500) {
   return String(n).padStart(2, "0");
 }
 
-function pad2(n: number) {
-  return padNumber(n, 500);
-}
-
 function formatCountdown24h(ms: number) {
   const s = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(s / 3600);
@@ -43,24 +42,17 @@ function formatCountdown24h(ms: number) {
   return `${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m ${String(ss).padStart(2, "0")}s`;
 }
 
-function maskName(name: string | null) {
-  if (!name) return "";
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 1) return parts[0].slice(0, 2) + "***";
-  return `${parts[0]} ${parts[1]?.slice(0, 1) ?? ""}.`;
-}
-
 function msLeft(lockedUntil: string | null) {
   if (!lockedUntil) return 0;
   const t = new Date(lockedUntil).getTime() - Date.now();
   return Math.max(0, t);
 }
 
-function formatMMSS(ms: number) {
-  const s = Math.floor(ms / 1000);
-  const mm = Math.floor(s / 60);
-  const ss = s % 60;
-  return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+function extractPixKey(instructions: string | null | undefined): string {
+  if (!instructions) return "financeiro@dahoramotoseletricas.com.br";
+  const match = instructions.match(/(?:chave pix|pix)[:\s]+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|\d{11}|\d{14}|\+[0-9]{12,13})/i);
+  if (match && match[1]) return match[1].replace(/[.,;:)]$/, "");
+  return "financeiro@dahoramotoseletricas.com.br";
 }
 
 export default function RaffleClient({
@@ -71,12 +63,12 @@ export default function RaffleClient({
   numbers: RaffleNumber[];
 }) {
   const [liveNumbers, setLiveNumbers] = useState<RaffleNumber[]>(numbers);
-
   const [selected, setSelected] = useState<number[]>([]);
   const [buyerName, setBuyerName] = useState("");
   const [buyerPhone, setBuyerPhone] = useState("");
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [pixCopied, setPixCopied] = useState(false);
 
   const [order, setOrder] = useState<null | {
     id?: string;
@@ -86,18 +78,12 @@ export default function RaffleClient({
     numbers?: number[];
   }>(null);
 
-  const [payInfo, setPayInfo] = useState<string | null>(null);
-
-  // UI controls
-  const [filter, setFilter] = useState<"all" | "free" | "reserved" | "paid">(
-    "all"
+  const [payInfo, setPayInfo] = useState<string | null>(
+    raffle.paymentInstructions ?? null
   );
+
   const [search, setSearch] = useState("");
-
-  // ✅ evita Hydration mismatch (SSR vs Client)
   const [mounted, setMounted] = useState(false);
-
-  // tick para countdown (só importa no client)
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
@@ -112,66 +98,49 @@ export default function RaffleClient({
         cache: "no-store",
       });
       const json = await res.json().catch(() => null);
-      if (json?.ok) setLiveNumbers(json.numbers ?? []);
+      if (json?.ok && Array.isArray(json.numbers)) {
+        setLiveNumbers(json.numbers);
+      }
     } catch {
       // silencioso
     }
   }
 
-  // auto refresh (5s)
+  // Auto-refresh a cada 5 segundos
   useEffect(() => {
     const id = setInterval(() => refreshNumbers(), 5000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [raffle.slug]);
 
-  const stats = useMemo(() => {
-    let free = 0,
-      reserved = 0,
-      paid = 0,
-      other = 0;
-
-    for (const n of liveNumbers) {
-      if (n.status === "free") free++;
-      else if (n.status === "reserved") reserved++;
-      else if (n.status === "paid") paid++;
-      else other++;
-    }
-
-    return { free, reserved, paid, other, total: liveNumbers.length };
+  // Filtra ESTRITAMENTE os números livres
+  const freeNumbers = useMemo(() => {
+    return liveNumbers.filter((n) => n.status === "free");
   }, [liveNumbers]);
 
-  const freeSet = useMemo(() => {
-    const s = new Set<number>();
-    for (const n of liveNumbers) if (n.status === "free") s.add(n.number);
-    return s;
-  }, [liveNumbers]);
+  const availableSet = useMemo(() => {
+    return new Set(freeNumbers.map((n) => n.number));
+  }, [freeNumbers]);
+
+  // Se algum selecionado deixar de estar livre, desmarca automaticamente
+  useEffect(() => {
+    setSelected((prev) => prev.filter((n) => availableSet.has(n)));
+  }, [availableSet]);
 
   const total = raffle.priceCents * selected.length;
 
   const filteredNumbers = useMemo(() => {
     const q = search.trim();
-    let list = liveNumbers;
-
-    if (filter !== "all") list = list.filter((n) => n.status === filter);
-
-    if (q) {
-      if (q.match(/^\d+$/)) {
-        const qNum = Number(q);
-        list = list.filter((n) => n.number === qNum);
-      } else {
-        const qLower = q.toLowerCase();
-        list = list.filter((n) =>
-          (n.buyer_name ?? "").toLowerCase().includes(qLower)
-        );
-      }
+    if (!q) return freeNumbers;
+    if (q.match(/^\d+$/)) {
+      const qNum = Number(q);
+      return freeNumbers.filter((n) => n.number === qNum);
     }
-
-    return list;
-  }, [liveNumbers, filter, search]);
+    return freeNumbers;
+  }, [freeNumbers, search]);
 
   function toggleNumber(n: number) {
-    if (!freeSet.has(n)) return;
+    if (!availableSet.has(n)) return;
     setSelected((prev) =>
       prev.includes(n)
         ? prev.filter((x) => x !== n)
@@ -179,15 +148,46 @@ export default function RaffleClient({
     );
   }
 
+  function pickRandom(count: number) {
+    const unselected = freeNumbers
+      .map((n) => n.number)
+      .filter((n) => !selected.includes(n));
+
+    if (!unselected.length) return;
+
+    // Embaralha
+    const shuffled = [...unselected].sort(() => 0.5 - Math.random());
+    const picked = shuffled.slice(0, count);
+
+    setSelected((prev) => [...prev, ...picked].sort((a, b) => a - b));
+  }
+
+  const pixKey = useMemo(() => {
+    return extractPixKey(payInfo || raffle.paymentInstructions);
+  }, [payInfo, raffle.paymentInstructions]);
+
+  async function copyPix() {
+    try {
+      await navigator.clipboard.writeText(pixKey);
+      setPixCopied(true);
+      setTimeout(() => setPixCopied(false), 3000);
+    } catch {
+      // fallback manual
+    }
+  }
+
   async function reservar() {
     setMsg(null);
-    setOrder(null);
-    setPayInfo(null);
-
-    if (selected.length === 0) return setMsg("Selecione pelo menos 1 número.");
-    if (buyerName.trim().length < 2) return setMsg("Digite seu nome.");
-    if (buyerPhone.trim().length < 8)
-      return setMsg("Digite seu WhatsApp/telefone.");
+    if (!buyerName.trim() || buyerName.trim().length < 2) {
+      return setMsg("Por favor, digite seu nome completo (mínimo 2 letras).");
+    }
+    const cleanPhone = buyerPhone.replace(/\D/g, "");
+    if (!cleanPhone || cleanPhone.length < 10) {
+      return setMsg("Por favor, digite seu WhatsApp com DDD (mínimo 10 dígitos).");
+    }
+    if (!selected.length) {
+      return setMsg("Por favor, escolha pelo menos 1 número da sorte.");
+    }
 
     setLoading(true);
     try {
@@ -195,9 +195,9 @@ export default function RaffleClient({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          slug: raffle.slug, // ✅ campo certo
-          name: buyerName, // ✅ campo certo
-          phone: buyerPhone, // ✅ campo certo
+          slug: raffle.slug,
+          name: buyerName.trim(),
+          phone: cleanPhone,
           numbers: selected,
         }),
       });
@@ -205,10 +205,9 @@ export default function RaffleClient({
       const json = await res.json().catch(() => null);
 
       if (!res.ok || !json?.ok) {
-        return setMsg(json?.message ?? "Falha ao reservar.");
+        return setMsg(json?.message ?? "Falha ao reservar seus números.");
       }
 
-      // ✅ resposta da reserva de 24 horas
       setOrder({
         id: json.order?.id,
         public_token: json.order.public_token,
@@ -217,369 +216,396 @@ export default function RaffleClient({
         numbers: json.order?.numbers ?? [...selected],
       });
 
-      setPayInfo(json.payment_instructions ?? null);
+      if (json.payment_instructions) {
+        setPayInfo(json.payment_instructions);
+      }
 
       setSelected([]);
       await refreshNumbers();
       setMsg(null);
     } catch (e: any) {
-      setMsg(e?.message ?? "Erro ao reservar.");
+      setMsg(e?.message ?? "Erro de conexão ao realizar reserva.");
     } finally {
       setLoading(false);
     }
   }
 
-  const selectedPreview = useMemo(() => {
-    if (selected.length === 0) return "Nenhum";
-    if (selected.length <= 10) return selected.map((n) => pad2(n)).join(", ");
-    return `${selected
-      .slice(0, 10)
-      .map((n) => pad2(n))
-      .join(", ")}… (+${selected.length - 10})`;
-  }, [selected]);
-
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <main className="max-w-6xl mx-auto p-4 sm:p-6">
-        {/* Header */}
-        <header className="mb-5">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 selection:bg-emerald-500 selection:text-white">
+      {/* Barra superior de identificação */}
+      <div className="border-b border-zinc-800/80 bg-zinc-900/50 backdrop-blur sticky top-0 z-20">
+        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="flex h-3 w-3 relative">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+            </span>
+            <span className="font-bold text-sm sm:text-base tracking-tight text-white">
+              Dahora Motos Elétricas
+            </span>
+          </div>
+
+          <a
+            href="https://dahoramotoseletricas.com.br"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-emerald-400 hover:text-emerald-300 transition flex items-center gap-1 font-medium bg-emerald-950/40 border border-emerald-800/50 px-3 py-1.5 rounded-full"
+          >
+            <span>dahoramotoseletricas.com.br</span>
+            <span>↗</span>
+          </a>
+        </div>
+      </div>
+
+      <main className="max-w-5xl mx-auto p-4 sm:p-6 space-y-6">
+        {/* Cabeçalho da Campanha */}
+        <header className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5 sm:p-6 space-y-3 shadow-lg shadow-black/40">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="px-2.5 py-1 rounded-full border border-emerald-800/50 bg-emerald-950/40 text-emerald-300 font-semibold">
+              ⚡ Reserva Válida por 24 Horas
+            </span>
+            <span className="px-2.5 py-1 rounded-full border border-zinc-800 bg-zinc-900/80 text-zinc-300">
+              Pagamento via Pix Manual
+            </span>
+            <span className="px-2.5 py-1 rounded-full border border-zinc-800 bg-zinc-900/80 text-zinc-400">
+              {freeNumbers.length} números disponíveis
+            </span>
+          </div>
+
+          <h1 className="text-2xl sm:text-4xl font-extrabold tracking-tight text-white">
+            {raffle.title}
+          </h1>
+
+          {raffle.description && (
+            <p className="text-zinc-300 text-sm sm:text-base leading-relaxed max-w-3xl">
+              {raffle.description}
+            </p>
+          )}
+
+          <div className="pt-2 flex flex-wrap items-center gap-4 text-xs sm:text-sm text-zinc-400 border-t border-zinc-800/60">
             <div>
-              <div className="inline-flex items-center gap-2 text-xs text-zinc-300">
-                <span className="px-2 py-1 rounded-full border border-zinc-800 bg-zinc-900/60">
-                  Rifa online
-                </span>
-                <span className="px-2 py-1 rounded-full border border-emerald-800/40 bg-emerald-950/30 text-emerald-300 font-medium">
-                  Reserva válida por 24 horas
-                </span>
-                <button
-                  onClick={refreshNumbers}
-                  className="px-2 py-1 rounded-full border border-zinc-800 bg-zinc-900/60 hover:bg-white/10"
-                  title="Atualizar agora"
-                >
-                  Atualizar
-                </button>
-              </div>
-
-              <h1 className="mt-3 text-2xl sm:text-3xl font-bold tracking-tight">
-                {raffle.title}
-              </h1>
-
-              {raffle.description && (
-                <p className="mt-2 text-zinc-300 max-w-2xl">
-                  {raffle.description}
-                </p>
-              )}
-            </div>
-
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
-              <div className="text-sm text-zinc-300">Preço por número</div>
-              <div className="text-xl font-bold">
+              Valor da Cota:{" "}
+              <b className="text-emerald-400 text-lg sm:text-xl font-bold ml-1">
                 {formatBRL(raffle.priceCents)}
-              </div>
-              <div className="mt-2 text-xs text-zinc-400">
-                Selecionados:{" "}
-                <span className="text-zinc-200">{selected.length}</span>
-              </div>
-              <div className="text-xs text-zinc-400">
-                Total: <span className="text-zinc-200">{formatBRL(total)}</span>
-              </div>
+              </b>
+            </div>
+            <div>•</div>
+            <div>
+              Total da Rifa: <span className="text-zinc-200 font-medium">{raffle.totalNumbers} números (001 a {raffle.totalNumbers})</span>
             </div>
           </div>
         </header>
 
-        {/* Stats + legenda + checkout */}
-        <section className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
-            <div className="text-sm text-zinc-300">Resumo</div>
-            <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
-                <div className="text-zinc-400">Livres</div>
-                <div className="text-lg font-bold">{stats.free}</div>
+        {/* Modal / Card de Reserva Concluída com Sucesso */}
+        {order && (
+          <div className="rounded-2xl border-2 border-emerald-500/60 bg-emerald-950/50 p-5 sm:p-6 space-y-4 shadow-xl shadow-emerald-950/30">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-emerald-800/40 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-2xl">🎉</span>
+                <span className="text-lg sm:text-xl font-bold text-white">
+                  Reserva Realizada com Sucesso!
+                </span>
               </div>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
-                <div className="text-zinc-400">Reservados</div>
-                <div className="text-lg font-bold">{stats.reserved}</div>
-              </div>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
-                <div className="text-zinc-400">Pagos</div>
-                <div className="text-lg font-bold">{stats.paid}</div>
-              </div>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
-                <div className="text-zinc-400">Total</div>
-                <div className="text-lg font-bold">{stats.total}</div>
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
-            <div className="text-sm text-zinc-300">Legenda</div>
-            <div className="mt-3 flex flex-wrap gap-2 text-xs">
-              <span className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-950/40 px-3 py-1">
-                <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
-                Livre
-              </span>
-              <span className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-950/40 px-3 py-1">
-                <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
-                Reservado
-              </span>
-              <span className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-950/40 px-3 py-1">
-                <span className="h-2.5 w-2.5 rounded-full bg-rose-400" />
-                Pago
-              </span>
-              <span className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-950/40 px-3 py-1">
-                <span className="h-2.5 w-2.5 rounded-full bg-white" />
-                Selecionado
+              <span className="text-xs bg-emerald-900/80 px-3 py-1 rounded-full text-emerald-200 font-mono font-semibold self-start sm:self-auto">
+                Pedido: #{order.public_token.slice(0, 8)}
               </span>
             </div>
 
-            <p className="mt-3 text-xs text-zinc-400">
-              Passe o mouse em um número reservado/pago para ver detalhes
-              (nome/tempo).
-            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div className="rounded-xl bg-zinc-950/60 p-3 border border-emerald-900/30">
+                <div className="text-xs text-zinc-400">Seus Números da Sorte:</div>
+                <div className="font-bold text-emerald-300 text-base mt-0.5">
+                  {(order.numbers ?? []).map((n) => padNumber(n, raffle.totalNumbers)).join(", ") || "—"}
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-zinc-950/60 p-3 border border-emerald-900/30">
+                <div className="text-xs text-zinc-400">Total a Pagar:</div>
+                <div className="font-bold text-emerald-300 text-base mt-0.5">
+                  {formatBRL(order.total_cents)}
+                </div>
+              </div>
+            </div>
+
+            {mounted && (
+              <div className="flex items-center justify-between rounded-xl border border-amber-500/40 bg-amber-950/40 px-4 py-2.5 text-xs sm:text-sm">
+                <span className="text-amber-200 font-medium">Prazo de Validade da Reserva:</span>
+                <span className="font-mono font-bold text-amber-300 text-sm sm:text-base">
+                  {formatCountdown24h(msLeft(order.expires_at))}
+                </span>
+              </div>
+            )}
+
+            {/* Chave Pix no Card de Sucesso */}
+            <div className="rounded-xl bg-zinc-950/70 p-4 border border-zinc-800 space-y-3">
+              <div className="text-xs font-semibold text-zinc-300">
+                Pague via Pix para garantir suas cotas:
+              </div>
+              <div className="flex items-center justify-between gap-2 bg-zinc-900 border border-zinc-700/80 rounded-xl px-3 py-2 text-sm">
+                <span className="font-mono text-emerald-400 font-semibold break-all text-xs sm:text-sm">
+                  {pixKey}
+                </span>
+                <button
+                  type="button"
+                  onClick={copyPix}
+                  className="shrink-0 px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition"
+                >
+                  {pixCopied ? "✓ Copiado!" : "Copiar Chave"}
+                </button>
+              </div>
+            </div>
+
+            {/* Botão de Envio de Comprovante no WhatsApp */}
+            <a
+              href={`https://api.whatsapp.com/send?text=${encodeURIComponent(
+                `Olá, Dahora Motos Elétricas! Acabei de reservar as cotas [${(order.numbers ?? []).map((n) => padNumber(n, raffle.totalNumbers)).join(", ")}] na rifa "${raffle.title}" no valor total de ${formatBRL(order.total_cents)} (Pedido #${order.public_token.slice(0, 8)}). Segue o comprovante de pagamento!`
+              )}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3.5 text-center text-sm font-bold text-white hover:bg-emerald-500 transition shadow-lg shadow-emerald-950/50"
+            >
+              <span>📱 Enviar Comprovante no WhatsApp</span>
+            </a>
           </div>
+        )}
 
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
-            <div className="text-sm text-zinc-300">Reservar</div>
+        {/* Bloco de Reserva e Chave Pix (Visual Limpo e Objetivo) */}
+        <section className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          {/* Formulário de Reserva (7 colunas) */}
+          <div className="lg:col-span-7 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5 sm:p-6 space-y-4 shadow-lg shadow-black/30">
+            <h2 className="text-lg font-bold text-white flex items-center gap-2">
+              <span>📝</span>
+              <span>Preencha seus Dados para Reservar</span>
+            </h2>
 
-            <div className="mt-3 grid grid-cols-1 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="text-xs text-zinc-400">Nome</label>
+                <label className="text-xs font-medium text-zinc-300">Nome Completo</label>
                 <input
-                  className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-600"
+                  type="text"
+                  className="mt-1 w-full rounded-xl border border-zinc-700/80 bg-zinc-950/60 px-3.5 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
                   value={buyerName}
                   onChange={(e) => setBuyerName(e.target.value)}
-                  placeholder="Seu nome"
+                  placeholder="Seu nome completo"
                 />
               </div>
 
               <div>
-                <label className="text-xs text-zinc-400">WhatsApp</label>
+                <label className="text-xs font-medium text-zinc-300">WhatsApp com DDD</label>
                 <input
-                  className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-600"
+                  type="tel"
+                  className="mt-1 w-full rounded-xl border border-zinc-700/80 bg-zinc-950/60 px-3.5 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
                   value={buyerPhone}
                   onChange={(e) => setBuyerPhone(e.target.value)}
-                  placeholder="(xx) 9xxxx-xxxx"
+                  placeholder="(14) 99999-9999"
                 />
               </div>
+            </div>
 
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
-                <div className="text-xs text-zinc-400">Selecionados</div>
-                <div className="mt-1 text-sm text-zinc-100">
-                  {selectedPreview}
+            {/* Cotas Selecionadas */}
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3.5 space-y-2">
+              <div className="flex items-center justify-between text-xs text-zinc-400">
+                <span>Cotas Selecionadas ({selected.length}):</span>
+                {selected.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setSelected([])}
+                    className="text-rose-400 hover:text-rose-300 underline font-medium"
+                  >
+                    Limpar
+                  </button>
+                )}
+              </div>
+
+              {selected.length === 0 ? (
+                <div className="text-xs text-zinc-500 py-1 italic">
+                  Toque nos números livres da grade abaixo para selecionar suas cotas.
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto pr-1">
+                  {selected.map((n) => (
+                    <span
+                      key={n}
+                      onClick={() => toggleNumber(n)}
+                      className="cursor-pointer inline-flex items-center gap-1 rounded-md bg-emerald-500/20 border border-emerald-500/50 px-2 py-0.5 text-xs font-mono font-bold text-emerald-300 hover:bg-rose-950 hover:border-rose-700 hover:text-rose-300 transition"
+                      title="Clique para remover"
+                    >
+                      {padNumber(n, raffle.totalNumbers)} ✕
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Total e Botão de Ação */}
+            <div className="pt-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-zinc-800/80">
+              <div>
+                <div className="text-xs text-zinc-400">Total a pagar:</div>
+                <div className="text-2xl font-extrabold text-emerald-400">
+                  {formatBRL(total)}
                 </div>
               </div>
 
               <button
+                type="button"
                 onClick={reservar}
-                disabled={loading}
-                className="rounded-xl border border-zinc-700 bg-white/10 px-4 py-2 text-sm font-semibold hover:bg-white/15 disabled:opacity-60"
+                disabled={loading || selected.length === 0}
+                className="rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-3.5 text-sm font-bold text-zinc-950 transition shadow-lg shadow-emerald-950/40"
               >
-                {loading ? "Reservando..." : "Reservar e pagar"}
+                {loading
+                  ? "Processando Reserva..."
+                  : selected.length === 0
+                  ? "Escolha seus números abaixo"
+                  : `Reservar e Pagar (${formatBRL(total)})`}
               </button>
+            </div>
 
-              {msg && (
-                <div className="rounded-xl border border-rose-900/40 bg-rose-950/30 p-3 text-sm text-rose-200">
-                  {msg}
+            {msg && (
+              <div className="rounded-xl border border-rose-900/50 bg-rose-950/40 p-3 text-xs sm:text-sm text-rose-200">
+                ⚠️ {msg}
+              </div>
+            )}
+          </div>
+
+          {/* Card de Informações Pix e Instruções (5 colunas) */}
+          <div className="lg:col-span-5 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5 sm:p-6 space-y-4 shadow-lg shadow-black/30 flex flex-col justify-between">
+            <div className="space-y-3">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <span>💰</span>
+                <span>Pagamento via Pix</span>
+              </h2>
+
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                Após clicar em <b>Reservar</b>, faça o Pix no valor total e envie o comprovante para confirmação imediata da sua cota.
+              </p>
+
+              <div className="rounded-xl bg-zinc-950/70 border border-zinc-800 p-3.5 space-y-2">
+                <div className="text-[11px] font-semibold text-zinc-400">
+                  Chave Pix Oficial da Loja:
                 </div>
-              )}
-
-              {order && (
-                <div className="rounded-xl border border-emerald-900/50 bg-emerald-950/40 p-4 text-sm text-emerald-200 space-y-3">
-                  <div className="flex items-center justify-between border-b border-emerald-900/40 pb-2">
-                    <span className="font-semibold text-emerald-300 text-base">Reserva Criada ✅</span>
-                    <span className="text-xs bg-emerald-900/60 px-2 py-0.5 rounded text-emerald-100 font-mono">
-                      #{order.public_token.slice(0, 8)}
-                    </span>
-                  </div>
-
-                  <div className="text-xs text-emerald-100/90 space-y-1">
-                    <div>
-                      <span className="text-zinc-400">Cotas reservadas:</span>{" "}
-                      <span className="font-semibold text-white">
-                        {(order.numbers ?? []).map((n) => padNumber(n, raffle.totalNumbers)).join(", ") || "—"}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-zinc-400">Total a pagar:</span>{" "}
-                      <b className="text-emerald-300 text-sm">
-                        {formatBRL(order.total_cents)}
-                      </b>
-                    </div>
-                    <div>
-                      <span className="text-zinc-400">Expira em:</span>{" "}
-                      <span>
-                        {mounted
-                          ? new Date(order.expires_at).toLocaleString("pt-BR")
-                          : order.expires_at}
-                      </span>
-                    </div>
-                  </div>
-
-                  {mounted && (
-                    <div className="flex items-center justify-between rounded-lg border border-amber-500/30 bg-amber-950/40 px-3 py-2 text-xs">
-                      <span className="text-amber-200">Tempo restante:</span>
-                      <span className="font-mono font-bold text-amber-300 text-sm">
-                        {formatCountdown24h(msLeft(order.expires_at))}
-                      </span>
-                    </div>
-                  )}
-
-                  <div className="rounded-lg bg-zinc-950/40 p-2.5 text-[11px] leading-relaxed text-zinc-300 border border-zinc-800">
-                    ⚠️ <b>Atenção:</b> Esta reserva tem validade fixa de <b>24 horas</b>. Realize o pagamento fora da plataforma e envie o comprovante para confirmação administrativa. Se o pagamento não for confirmado dentro das 24 horas, os números serão liberados automaticamente.
-                  </div>
-
-                  {payInfo && (
-                    <div className="rounded-xl border border-emerald-800/40 bg-emerald-950/30 p-3 text-xs text-emerald-100/90 whitespace-pre-wrap">
-                      <div className="font-semibold text-zinc-300 mb-1">Instruções de Pagamento:</div>
-                      {payInfo}
-                    </div>
-                  )}
-
-                  <a
-                    href={`https://api.whatsapp.com/send?text=${encodeURIComponent(
-                      `Olá! Reservei as cotas [${(order.numbers ?? []).map((n) => padNumber(n, raffle.totalNumbers)).join(", ")}] na rifa "${raffle.title}" (Token do Pedido: ${order.public_token.slice(0, 8)}). Segue em anexo o comprovante de pagamento!`
-                    )}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-center text-xs font-semibold text-white hover:bg-emerald-500 transition shadow-lg shadow-emerald-950/40"
+                <div className="flex items-center justify-between gap-2 bg-zinc-900 border border-zinc-700/80 rounded-xl px-3 py-2">
+                  <span className="font-mono text-emerald-400 font-bold text-xs sm:text-sm truncate">
+                    {pixKey}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={copyPix}
+                    className="shrink-0 px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition"
                   >
-                    <span>📱 Enviar Comprovante via WhatsApp</span>
-                  </a>
+                    {pixCopied ? "✓ Copiado!" : "Copiar"}
+                  </button>
                 </div>
-              )}
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-emerald-950/30 border border-emerald-900/40 p-3.5 text-xs text-emerald-200/90 leading-relaxed space-y-1.5">
+              <div className="font-bold text-emerald-300">Como funciona a reserva?</div>
+              <div>• A sua reserva fica garantida por <b>24 horas</b>.</div>
+              <div>• Suas cotas saem imediatamente da grade pública.</div>
+              <div>• Confirmação 100% manual com envio do comprovante.</div>
             </div>
           </div>
         </section>
 
-        {/* Filtros */}
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4 mb-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex flex-wrap gap-2">
-              {(["all", "free", "reserved", "paid"] as const).map((k) => {
-                const active = filter === k;
-                const label =
-                  k === "all"
-                    ? "Todos"
-                    : k === "free"
-                    ? "Livres"
-                    : k === "reserved"
-                    ? "Reservados"
-                    : "Pagos";
+        {/* Grade de Números Livres */}
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5 sm:p-6 space-y-4 shadow-lg shadow-black/30">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-800/80 pb-4">
+            <div>
+              <h2 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2">
+                <span>🎯</span>
+                <span>Escolha seus Números da Sorte</span>
+              </h2>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                Mostrando <b>apenas números 100% livres e disponíveis</b> ({freeNumbers.length} disponíveis).
+              </p>
+            </div>
+
+            {/* Ações Rápidas de Seleção */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-zinc-400 mr-1">Rápido:</span>
+              <button
+                type="button"
+                onClick={() => pickRandom(1)}
+                className="px-2.5 py-1 text-xs rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 font-medium transition"
+              >
+                +1 Aleatório
+              </button>
+              <button
+                type="button"
+                onClick={() => pickRandom(5)}
+                className="px-2.5 py-1 text-xs rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 font-medium transition"
+              >
+                +5 Aleatórios
+              </button>
+              <button
+                type="button"
+                onClick={() => pickRandom(10)}
+                className="px-2.5 py-1 text-xs rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 font-medium transition"
+              >
+                +10 Aleatórios
+              </button>
+            </div>
+          </div>
+
+          {/* Campo de Busca Rápida */}
+          <div className="max-w-xs">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="🔍 Buscar número disponível..."
+              className="w-full rounded-xl border border-zinc-700/80 bg-zinc-950/60 px-3.5 py-2 text-xs outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 text-zinc-100 placeholder:text-zinc-500 transition"
+            />
+          </div>
+
+          {/* Grade de Botões dos Números */}
+          {filteredNumbers.length === 0 ? (
+            <div className="py-12 text-center text-zinc-500 text-sm">
+              Nenhum número livre encontrado para a busca "{search}".
+            </div>
+          ) : (
+            <div className="grid grid-cols-5 sm:grid-cols-10 md:grid-cols-12 lg:grid-cols-15 gap-2 max-h-[500px] overflow-y-auto p-1 rounded-xl border border-zinc-800/60 bg-zinc-950/40">
+              {filteredNumbers.map((n) => {
+                const isSelected = selected.includes(n.number);
+
                 return (
                   <button
-                    key={k}
-                    onClick={() => setFilter(k)}
-                    className={[
-                      "rounded-full px-3 py-1 text-xs border",
-                      active
-                        ? "border-zinc-500 bg-white/15 text-white"
-                        : "border-zinc-800 bg-zinc-950/40 text-zinc-300 hover:bg-white/10",
-                    ].join(" ")}
+                    key={n.number}
+                    type="button"
+                    onClick={() => toggleNumber(n.number)}
+                    className={`h-11 rounded-xl font-mono text-xs sm:text-sm font-bold flex flex-col items-center justify-center transition-all ${
+                      isSelected
+                        ? "bg-emerald-500 text-zinc-950 shadow-md shadow-emerald-500/30 scale-105 border-2 border-emerald-300 font-extrabold"
+                        : "bg-zinc-900/90 text-zinc-200 hover:bg-zinc-800 hover:text-white border border-zinc-800/90 hover:border-zinc-700"
+                    }`}
                   >
-                    {label}
+                    <span>{padNumber(n.number, raffle.totalNumbers)}</span>
+                    {isSelected && (
+                      <span className="text-[9px] -mt-0.5 leading-none font-bold">✓</span>
+                    )}
                   </button>
                 );
               })}
             </div>
-
-            <div className="flex gap-2">
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full sm:w-72 rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-600"
-                placeholder="Buscar nº (ex: 07) ou nome (ex: joão)"
-              />
-              <button
-                onClick={() => {
-                  setSearch("");
-                  setFilter("all");
-                }}
-                className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm hover:bg-white/10"
-              >
-                Limpar
-              </button>
-            </div>
-          </div>
+          )}
         </section>
 
-        {/* Grade 01..100 */}
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="font-semibold">Números (01–100)</h2>
-            <div className="text-xs text-zinc-400">
-              Mostrando:{" "}
-              <span className="text-zinc-200">{filteredNumbers.length}</span>
-            </div>
+        {/* Rodapé Limpo */}
+        <footer className="pt-4 pb-8 text-center text-xs text-zinc-500 space-y-1">
+          <div>
+            <b>Dahora Motos Elétricas</b> — Todos os direitos reservados.
           </div>
-
-          <div className="grid grid-cols-5 sm:grid-cols-10 md:grid-cols-10 lg:grid-cols-10 gap-2">
-            {filteredNumbers.map((n) => {
-              void tick;
-
-              const isFree = n.status === "free";
-              const isSelected = selected.includes(n.number);
-              const left = n.status === "reserved" ? msLeft(n.locked_until) : 0;
-
-              const base =
-                "relative rounded-xl border px-2 py-2 text-xs sm:text-sm font-semibold transition select-none";
-              const disabled = "cursor-not-allowed opacity-75";
-              const hover = "hover:brightness-110";
-
-              let cls = `${base} border-zinc-800 bg-zinc-950/40 text-zinc-100 ${hover}`;
-
-              if (n.status === "reserved")
-                cls = `${base} border-amber-500/30 bg-amber-950/30 text-amber-100 ${disabled}`;
-              if (n.status === "paid")
-                cls = `${base} border-rose-500/30 bg-rose-950/30 text-rose-100 ${disabled}`;
-              if (n.status !== "free" && n.status !== "reserved" && n.status !== "paid")
-                cls = `${base} border-zinc-800 bg-zinc-900/40 text-zinc-400 ${disabled}`;
-
-              if (isSelected) cls = `${base} border-white/30 bg-white text-black`;
-
-              // ✅ title sem locale/date no SSR (evita mismatch)
-              let title = "Indisponível";
-              if (n.status === "free") title = "Livre";
-              if (n.status === "reserved") title = `Reservado • ${maskName(n.buyer_name)}`;
-              if (n.status === "paid") title = `Pago • ${maskName(n.buyer_name)}`;
-
-              return (
-                <button
-                  key={n.number}
-                  title={title}
-                  onClick={() => toggleNumber(n.number)}
-                  disabled={!isFree}
-                  className={cls}
-                >
-                  <div className="flex items-center justify-between">
-                    <span>{pad2(n.number)}</span>
-
-                    {!isSelected && n.status === "free" && (
-                      <span className="h-2 w-2 rounded-full bg-emerald-400/90" />
-                    )}
-                    {!isSelected && n.status === "reserved" && (
-                      <span className="h-2 w-2 rounded-full bg-amber-400/90" />
-                    )}
-                    {!isSelected && n.status === "paid" && (
-                      <span className="h-2 w-2 rounded-full bg-rose-400/90" />
-                    )}
-                    {isSelected && <span className="h-2 w-2 rounded-full bg-black/70" />}
-                  </div>
-
-                  {/* ✅ contador só depois do mount */}
-                  {mounted && !isSelected && n.status === "reserved" && left > 0 && (
-                    <div className="mt-1 text-[10px] leading-none text-amber-200/90 font-medium">
-                      {formatMMSS(left)}
-                    </div>
-                  )}
-                </button>
-              );
-            })}
+          <div>
+            Acesse nossa loja online:{" "}
+            <a
+              href="https://dahoramotoseletricas.com.br"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-emerald-400 hover:underline"
+            >
+              dahoramotoseletricas.com.br
+            </a>
           </div>
-        </section>
-
-        <footer className="py-8 text-center text-xs text-zinc-500">
-          © 2026 • Rifa SaaS
         </footer>
       </main>
     </div>
