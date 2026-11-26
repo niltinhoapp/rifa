@@ -48,7 +48,7 @@ export async function GET(
     .from("raffle_numbers")
     .select("number,status,locked_until,buyer_name")
     .eq("raffle_id", raffle.id)
-    .eq("status", "free")
+    .in("status", ["free", "reserved", "paid"])
     .order("number", { ascending: true });
 
   if (nErr) {
