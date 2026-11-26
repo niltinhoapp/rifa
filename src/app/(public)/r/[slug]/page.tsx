@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { supabaseServer } from "@/lib/supabase/server";
 import RaffleClient from "./raffle-client";
 
@@ -7,6 +8,50 @@ export const revalidate = 0;
 type PageProps = {
   params: Promise<{ slug: string }>;
 };
+
+const DAHORA_SLUG = "dahora-motos-eletricas";
+const DAHORA_URL = "https://rifa-es8i.onrender.com/r/dahora-motos-eletricas";
+const SCOOTER_X13_IMAGE =
+  "https://static.wixstatic.com/media/acc37b_ea46cbef3a994e9ebef21e7d2d46465b~mv2.webp";
+
+export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+  const { slug } = await params;
+
+  // Esta primeira campanha é um teste interno. Somente ela recebe a identidade
+  // pública da Dahora; as demais rotas continuam herdando os metadados globais.
+  if (slug !== DAHORA_SLUG) return {};
+
+  const title = "DAHORA MOTOS ELÉTRICAS | Concorra à Scooter X13";
+  const description =
+    "Escolha seus números da sorte e concorra a uma Scooter X13. São 500 números disponíveis por R$ 25,00 cada.";
+
+  return {
+    title,
+    description,
+    openGraph: {
+      type: "website",
+      locale: "pt_BR",
+      url: DAHORA_URL,
+      siteName: "DAHORA MOTOS ELÉTRICAS",
+      title,
+      description,
+      images: [
+        {
+          url: SCOOTER_X13_IMAGE,
+          width: 500,
+          height: 477,
+          alt: "Scooter elétrica X13 da Dahora Motos Elétricas",
+        },
+      ],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: [SCOOTER_X13_IMAGE],
+    },
+  };
+}
 
 export default async function RifaPage({ params }: PageProps) {
   const { slug } = await params;
