@@ -296,7 +296,7 @@ export default function RaffleClient({
 
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 relative z-10">
             <div className="w-full md:w-[42%] shrink-0 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-950">
-              <img src="https://static.wixstatic.com/media/acc37b_79f5e928245e4f8498b6ece85c2d8d2b~mv2.jpeg" alt="Moto elétrica R20 PRIME" className="w-full h-auto max-h-[360px] object-contain" fetchPriority="high" />
+              <img src="/imagens/R-20.jpeg" alt="Moto elétrica R20 PRIME" className="w-full h-auto max-h-[360px] object-contain" fetchPriority="high" />
             </div>
             <div className="space-y-2">
               <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-bold text-emerald-300">
