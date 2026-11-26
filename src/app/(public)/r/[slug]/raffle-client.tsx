@@ -290,11 +290,11 @@ export default function RaffleClient({
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-6 sm:py-8 space-y-6">
-        {/* Banner do Prêmio — Scooter Elétrica 0km */}
+        {/* Banner do Prêmio — Moto Elétrica R20 PRIME */}
         <section className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-gradient-to-br from-zinc-900 via-zinc-900/90 to-zinc-950 p-6 sm:p-8 shadow-xl">
           <div className="absolute top-0 right-0 -mt-10 -mr-10 h-48 w-48 rounded-full bg-emerald-500/10 blur-3xl pointer-events-none" />
 
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 relative z-10">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 relative z-10">\n            <div className="w-full md:w-[42%] shrink-0 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-950">\n              <img src="https://static.wixstatic.com/media/acc37b_79f5e928245e4f8498b6ece85c2d8d2b~mv2.jpeg" alt="Moto elétrica R20 PRIME" className="w-full h-auto max-h-[360px] object-contain" fetchPriority="high" />\n            </div>
             <div className="space-y-2">
               <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-bold text-emerald-300">
                 <span>🛵 PRÊMIO PRINCIPAL</span>
@@ -303,11 +303,11 @@ export default function RaffleClient({
               </div>
 
               <h2 className="text-2xl sm:text-3xl md:text-4xl font-extrabold text-white tracking-tight">
-                Scooter Elétrica 0km
+                Moto Elétrica R20 PRIME
               </h2>
 
               <p className="text-sm text-zinc-300 max-w-2xl leading-relaxed">
-                Concorra a uma <b>Scooter Elétrica 0km</b> de alta autonomia, moderna, econômica e sustentável, fornecida e garantida pela <b>Dahora Motos Elétricas</b>. Escolha seus números da sorte de 001 a 500!
+                Concorra a uma <b>Moto Elétrica R20 PRIME</b> com motor de 1000W, autonomia de até 50 km e bateria removível, fornecida e garantida pela <b>Dahora Motos Elétricas</b>. Escolha seus números da sorte de 001 a 500!
               </p>
             </div>
 
@@ -402,7 +402,7 @@ export default function RaffleClient({
             {/* Botão de Envio de Comprovante no WhatsApp com telefone pré-definido */}
             <a
               href={`https://api.whatsapp.com/send?phone=5514998877886&text=${encodeURIComponent(
-                `Olá, Dahora Motos Elétricas! Acabei de reservar as cotas [${(order.numbers ?? []).map((n) => padNumber(n, raffle.totalNumbers)).join(", ")}] na rifa da Scooter Elétrica no valor de ${formatBRL(order.total_cents)} (Pedido #${order.public_token.slice(0, 8)}). Segue o meu comprovante de pagamento!`
+                `Olá, Dahora Motos Elétricas! Acabei de reservar as cotas [${(order.numbers ?? []).map((n) => padNumber(n, raffle.totalNumbers)).join(", ")}] na rifa da Moto Elétrica R20 PRIME no valor de ${formatBRL(order.total_cents)} (Pedido #${order.public_token.slice(0, 8)}). Segue o meu comprovante de pagamento!`
               )}`}
               target="_blank"
               rel="noopener noreferrer"
