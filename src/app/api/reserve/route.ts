@@ -76,14 +76,12 @@ export async function POST(req: Request) {
 
   return NextResponse.json({
     ok: true,
-    order: {
-      id: reservation.order_id,
-      public_token: reservation.public_token,
-      reserved_at: reservation.reserved_at,
-      expires_at: reservation.expires_at,
-      total_cents: reservation.total_cents,
-      numbers: uniqueNumbers,
-    },
+    order_id: reservation.order_id,
+    public_token: reservation.public_token,
+    reserved_at: reservation.reserved_at,
+    expires_at: reservation.expires_at,
+    total_cents: reservation.total_cents,
+    numbers: uniqueNumbers,
     payment_instructions: raffleMeta?.payment_instructions ?? null,
   });
 }
