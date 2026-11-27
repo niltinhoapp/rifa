@@ -1,18 +1,12 @@
 import { redirect } from "next/navigation";
-import { supabaseServer } from "@/lib/supabase/server";
+import { getActiveWorkspace } from "@/lib/workspace";
 
 export default async function AppHome() {
-  const sb = await supabaseServer();
-  const { data, error } = await sb.auth.getUser();
+  const { user, workspace } = await getActiveWorkspace();
 
-  if (error || !data.user) redirect("/app/login");
+  if (!user) redirect("/app/login");
+  if (!workspace) redirect("/app/onboarding");
 
-  return (
-    <main className="min-h-screen bg-zinc-950 text-zinc-100 p-6">
-      <div className="max-w-3xl mx-auto rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5">
-        <h1 className="text-xl font-bold">Admin OK ✅</h1>
-        <p className="text-sm text-zinc-400 mt-2">Você está logado.</p>
-      </div>
-    </main>
-  );
+  // Usuário autenticado com workspace segue diretamente para a gestão das rifas.
+  redirect("/app/raffles");
 }
