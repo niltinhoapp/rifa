@@ -4,6 +4,9 @@ import { supabaseServer } from "@/lib/supabase/server";
 import { getActiveWorkspace } from "@/lib/workspace";
 import { createRaffleAction } from "./actions";
 
+// Rifa antiga de teste: preservada no banco, mas fora do painel do cliente.
+const HIDDEN_TEST_RAFFLE_ID = "2540c50d-4ee9-4219-ba9c-06fe3907d062";
+
 export default async function RafflesPage() {
   const { user, workspace } = await getActiveWorkspace();
   if (!user) redirect("/app/login");
@@ -15,7 +18,13 @@ export default async function RafflesPage() {
     .from("raffles")
     .select("id,title,slug,status,total_numbers,price_cents,created_at")
     .eq("workspace_id", workspace.id)
+    .neq("id", HIDDEN_TEST_RAFFLE_ID)
     .order("created_at", { ascending: false });
+
+  // Quando houver apenas uma rifa visível, abrir diretamente sua administração.
+  if (raffles?.length === 1) {
+    redirect(`/app/raffles/${raffles[0].id}`);
+  }
 
   return (
     <main className="min-h-screen bg-zinc-950 text-zinc-100 p-6">
@@ -44,7 +53,7 @@ export default async function RafflesPage() {
                 name="title"
                 required
                 className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-600"
-                placeholder="Ex: Kit churrasco"
+                placeholder="Ex: Minha nova rifa"
               />
             </div>
 
@@ -62,7 +71,7 @@ export default async function RafflesPage() {
               <input
                 name="prize"
                 className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm outline-none focus:border-zinc-600"
-                placeholder="Ex: Kit churrasco"
+                placeholder="Ex: Prêmio da rifa"
               />
             </div>
 
