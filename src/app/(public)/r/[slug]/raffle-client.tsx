@@ -290,60 +290,6 @@ export default function RaffleClient({
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-6 sm:py-8 space-y-6">
-        {/* Banner do Prêmio — Moto Elétrica R20 PRIME */}
-        <section className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-gradient-to-br from-zinc-900 via-zinc-900/90 to-zinc-950 p-6 sm:p-8 shadow-xl">
-          <div className="absolute top-0 right-0 -mt-10 -mr-10 h-48 w-48 rounded-full bg-emerald-500/10 blur-3xl pointer-events-none" />
-
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 relative z-10">
-            <div className="w-full md:w-[42%] shrink-0 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-950">
-              <img src="/imagens/R-20.jpeg" alt="Moto elétrica R20 PRIME" className="w-full h-auto max-h-[360px] object-contain" fetchPriority="high" />
-            </div>
-            <div className="space-y-2">
-              <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-bold text-emerald-300">
-                <span>🛵 PRÊMIO PRINCIPAL</span>
-                <span>•</span>
-                <span>0KM NOVINHA</span>
-              </div>
-
-              <h2 className="text-2xl sm:text-3xl md:text-4xl font-extrabold text-white tracking-tight">
-                Moto Elétrica R20 PRIME
-              </h2>
-
-              <p className="text-sm text-zinc-300 max-w-2xl leading-relaxed">
-                Concorra a uma <b>Moto Elétrica R20 PRIME</b> com motor de 1000W, autonomia de até 50 km e bateria removível, fornecida e garantida pela <b>Dahora Motos Elétricas</b>. Escolha seus números da sorte de 001 a 500!
-              </p>
-            </div>
-
-            <div className="shrink-0 flex flex-col items-start md:items-end justify-center rounded-xl bg-zinc-950/80 border border-zinc-800/90 p-4 sm:p-5 min-w-[200px]">
-              <div className="text-xs text-zinc-400 font-medium">Valor por Cota</div>
-              <div className="text-3xl font-extrabold text-emerald-400">
-                {formatBRL(raffle.priceCents)}
-              </div>
-              <div className="text-[11px] text-zinc-400 mt-1">
-                Apenas 500 cotas disponíveis!
-              </div>
-            </div>
-          </div>
-
-          {/* Barra de Progresso da Rifa */}
-          <div className="mt-6 pt-4 border-t border-zinc-800/80 space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-zinc-400">
-                Progresso das Vendas: <b className="text-white">{paidNumbers.length} cotas confirmadas</b> ({pctSold}%)
-              </span>
-              <span className="text-emerald-400 font-bold">
-                {freeNumbers.length} cotas livres
-              </span>
-            </div>
-            <div className="w-full bg-zinc-950 rounded-full h-2.5 overflow-hidden border border-zinc-800">
-              <div
-                className="bg-gradient-to-r from-emerald-500 to-teal-400 h-2.5 rounded-full transition-all duration-500"
-                style={{ width: `${Math.max(2, pctSold)}%` }}
-              />
-            </div>
-          </div>
-        </section>
-
         {/* Modal / Card de Confirmação de Reserva Gerada */}
         {order && (
           <div className="rounded-2xl border-2 border-emerald-500 bg-emerald-950/40 p-6 space-y-4 shadow-2xl backdrop-blur-md animate-in fade-in duration-300">
@@ -415,6 +361,105 @@ export default function RaffleClient({
             </a>
           </div>
         )}
+
+        {/* Grade de Escolha dos Números */}
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5 sm:p-6 space-y-4 shadow-lg shadow-black/30">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-800/80 pb-4">
+            <div>
+              <h2 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2">
+                <span>🎯</span>
+                <span>Escolha suas Cotas da Sorte</span>
+              </h2>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                Números <b>livres</b> (clique para marcar) ou <b>amarelos</b> (reservados aguardando pagamento).
+              </p>
+            </div>
+
+            {/* Ações Rápidas de Seleção */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-zinc-400 mr-1">Rápido:</span>
+              <button
+                type="button"
+                onClick={() => pickRandom(1)}
+                className="px-2.5 py-1 text-xs rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 font-medium transition"
+              >
+                +1 Aleatório
+              </button>
+              <button
+                type="button"
+                onClick={() => pickRandom(5)}
+                className="px-2.5 py-1 text-xs rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 font-medium transition"
+              >
+                +5 Aleatórios
+              </button>
+              <button
+                type="button"
+                onClick={() => pickRandom(10)}
+                className="px-2.5 py-1 text-xs rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 font-medium transition"
+              >
+                +10 Aleatórios
+              </button>
+            </div>
+          </div>
+
+          {/* Campo de Busca Rápida */}
+          <div className="max-w-xs">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="🔍 Buscar número na grade..."
+              className="w-full rounded-xl border border-zinc-700/80 bg-zinc-950/60 px-3.5 py-2 text-xs outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 text-zinc-100 placeholder:text-zinc-500 transition"
+            />
+          </div>
+
+          {/* Grade de Botões dos Números */}
+          {filteredGridNumbers.length === 0 ? (
+            <div className="py-12 text-center text-zinc-500 text-sm">
+              Nenhum número disponível encontrado para a busca "{search}".
+            </div>
+          ) : (
+            <div className="grid grid-cols-5 sm:grid-cols-10 md:grid-cols-12 lg:grid-cols-15 gap-2 max-h-[520px] overflow-y-auto p-1 rounded-xl border border-zinc-800/60 bg-zinc-950/40">
+              {filteredGridNumbers.map((n) => {
+                const isSelected = selected.includes(n.number);
+                const isReserved = n.status === "reserved";
+
+                if (isReserved) {
+                  return (
+                    <div
+                      key={n.number}
+                      className="h-11 rounded-xl font-mono text-xs font-bold flex flex-col items-center justify-center bg-amber-500/15 text-amber-300 border border-amber-500/50 cursor-not-allowed select-none opacity-90"
+                      title={`Cota ${padNumber(n.number, raffle.totalNumbers)} reservada (aguardando confirmação)`}
+                    >
+                      <span>{padNumber(n.number, raffle.totalNumbers)}</span>
+                      <span className="text-[8px] font-semibold tracking-tighter text-amber-400">
+                        RESERVADO
+                      </span>
+                    </div>
+                  );
+                }
+
+                return (
+                  <button
+                    key={n.number}
+                    type="button"
+                    onClick={() => toggleNumber(n.number)}
+                    className={`h-11 rounded-xl font-mono text-xs sm:text-sm font-bold flex flex-col items-center justify-center transition-all ${
+                      isSelected
+                        ? "bg-emerald-500 text-zinc-950 shadow-md shadow-emerald-500/30 scale-105 border-2 border-emerald-300 font-extrabold"
+                        : "bg-zinc-900/90 text-zinc-200 hover:bg-zinc-800 hover:text-white border border-zinc-800/90 hover:border-zinc-700"
+                    }`}
+                  >
+                    <span>{padNumber(n.number, raffle.totalNumbers)}</span>
+                    {isSelected && (
+                      <span className="text-[9px] -mt-0.5 leading-none font-bold">✓</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
 
         {/* Bloco de Reserva e Chave Pix */}
         <section className="grid grid-cols-1 lg:grid-cols-12 gap-5">
@@ -564,103 +609,58 @@ export default function RaffleClient({
           </div>
         </section>
 
-        {/* Grade de Escolha dos Números */}
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5 sm:p-6 space-y-4 shadow-lg shadow-black/30">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-800/80 pb-4">
-            <div>
-              <h2 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2">
-                <span>🎯</span>
-                <span>Escolha suas Cotas da Sorte</span>
+        {/* Banner do Prêmio — Moto Elétrica R20 PRIME */}
+        <section className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-gradient-to-br from-zinc-900 via-zinc-900/90 to-zinc-950 p-6 sm:p-8 shadow-xl">
+          <div className="absolute top-0 right-0 -mt-10 -mr-10 h-48 w-48 rounded-full bg-emerald-500/10 blur-3xl pointer-events-none" />
+
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 relative z-10">
+            <div className="w-full md:w-[42%] shrink-0 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-950">
+              <img src="/imagens/R-20.jpeg" alt="Moto elétrica R20 PRIME" className="w-full h-auto max-h-[360px] object-contain" fetchPriority="high" />
+            </div>
+            <div className="space-y-2">
+              <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-bold text-emerald-300">
+                <span>🛵 PRÊMIO PRINCIPAL</span>
+                <span>•</span>
+                <span>0KM NOVINHA</span>
+              </div>
+
+              <h2 className="text-2xl sm:text-3xl md:text-4xl font-extrabold text-white tracking-tight">
+                Moto Elétrica R20 PRIME
               </h2>
-              <p className="text-xs text-zinc-400 mt-0.5">
-                Números <b>livres</b> (clique para marcar) ou <b>amarelos</b> (reservados aguardando pagamento).
+
+              <p className="text-sm text-zinc-300 max-w-2xl leading-relaxed">
+                Concorra a uma <b>Moto Elétrica R20 PRIME</b> com motor de 1000W, autonomia de até 50 km e bateria removível, fornecida e garantida pela <b>Dahora Motos Elétricas</b>. Escolha seus números da sorte de 001 a 500!
               </p>
             </div>
 
-            {/* Ações Rápidas de Seleção */}
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-zinc-400 mr-1">Rápido:</span>
-              <button
-                type="button"
-                onClick={() => pickRandom(1)}
-                className="px-2.5 py-1 text-xs rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 font-medium transition"
-              >
-                +1 Aleatório
-              </button>
-              <button
-                type="button"
-                onClick={() => pickRandom(5)}
-                className="px-2.5 py-1 text-xs rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 font-medium transition"
-              >
-                +5 Aleatórios
-              </button>
-              <button
-                type="button"
-                onClick={() => pickRandom(10)}
-                className="px-2.5 py-1 text-xs rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-200 font-medium transition"
-              >
-                +10 Aleatórios
-              </button>
+            <div className="shrink-0 flex flex-col items-start md:items-end justify-center rounded-xl bg-zinc-950/80 border border-zinc-800/90 p-4 sm:p-5 min-w-[200px]">
+              <div className="text-xs text-zinc-400 font-medium">Valor por Cota</div>
+              <div className="text-3xl font-extrabold text-emerald-400">
+                {formatBRL(raffle.priceCents)}
+              </div>
+              <div className="text-[11px] text-zinc-400 mt-1">
+                Apenas 500 cotas disponíveis!
+              </div>
             </div>
           </div>
 
-          {/* Campo de Busca Rápida */}
-          <div className="max-w-xs">
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="🔍 Buscar número na grade..."
-              className="w-full rounded-xl border border-zinc-700/80 bg-zinc-950/60 px-3.5 py-2 text-xs outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 text-zinc-100 placeholder:text-zinc-500 transition"
-            />
+          {/* Barra de Progresso da Rifa */}
+          <div className="mt-6 pt-4 border-t border-zinc-800/80 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-zinc-400">
+                Progresso das Vendas: <b className="text-white">{paidNumbers.length} cotas confirmadas</b> ({pctSold}%)
+              </span>
+              <span className="text-emerald-400 font-bold">
+                {freeNumbers.length} cotas livres
+              </span>
+            </div>
+            <div className="w-full bg-zinc-950 rounded-full h-2.5 overflow-hidden border border-zinc-800">
+              <div
+                className="bg-gradient-to-r from-emerald-500 to-teal-400 h-2.5 rounded-full transition-all duration-500"
+                style={{ width: `${Math.max(2, pctSold)}%` }}
+              />
+            </div>
           </div>
-
-          {/* Grade de Botões dos Números */}
-          {filteredGridNumbers.length === 0 ? (
-            <div className="py-12 text-center text-zinc-500 text-sm">
-              Nenhum número disponível encontrado para a busca "{search}".
-            </div>
-          ) : (
-            <div className="grid grid-cols-5 sm:grid-cols-10 md:grid-cols-12 lg:grid-cols-15 gap-2 max-h-[520px] overflow-y-auto p-1 rounded-xl border border-zinc-800/60 bg-zinc-950/40">
-              {filteredGridNumbers.map((n) => {
-                const isSelected = selected.includes(n.number);
-                const isReserved = n.status === "reserved";
-
-                if (isReserved) {
-                  return (
-                    <div
-                      key={n.number}
-                      className="h-11 rounded-xl font-mono text-xs font-bold flex flex-col items-center justify-center bg-amber-500/15 text-amber-300 border border-amber-500/50 cursor-not-allowed select-none opacity-90"
-                      title={`Cota ${padNumber(n.number, raffle.totalNumbers)} reservada (aguardando confirmação)`}
-                    >
-                      <span>{padNumber(n.number, raffle.totalNumbers)}</span>
-                      <span className="text-[8px] font-semibold tracking-tighter text-amber-400">
-                        RESERVADO
-                      </span>
-                    </div>
-                  );
-                }
-
-                return (
-                  <button
-                    key={n.number}
-                    type="button"
-                    onClick={() => toggleNumber(n.number)}
-                    className={`h-11 rounded-xl font-mono text-xs sm:text-sm font-bold flex flex-col items-center justify-center transition-all ${
-                      isSelected
-                        ? "bg-emerald-500 text-zinc-950 shadow-md shadow-emerald-500/30 scale-105 border-2 border-emerald-300 font-extrabold"
-                        : "bg-zinc-900/90 text-zinc-200 hover:bg-zinc-800 hover:text-white border border-zinc-800/90 hover:border-zinc-700"
-                    }`}
-                  >
-                    <span>{padNumber(n.number, raffle.totalNumbers)}</span>
-                    {isSelected && (
-                      <span className="text-[9px] -mt-0.5 leading-none font-bold">✓</span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
         </section>
 
         {/* Seção de Transparência: Lista de Compradores / Cotas Confirmadas */}
