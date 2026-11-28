@@ -462,9 +462,10 @@ export default function RaffleClient({
         </section>
 
         {/* Bloco de Reserva e Chave Pix */}
-        <section className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+        {/* Etapa visual 2: cadastro e confirmação da reserva */}
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5 sm:p-6 space-y-4 shadow-lg shadow-black/30">
           {/* Formulário de Reserva (7 colunas) */}
-          <div className="lg:col-span-7 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5 sm:p-6 space-y-4 shadow-lg shadow-black/30">
+          <div className="space-y-4">
             <h2 className="text-lg font-bold text-white flex items-center gap-2">
               <span>📝</span>
               <span>Preencha seus Dados para Reservar</span>
@@ -559,8 +560,12 @@ export default function RaffleClient({
             )}
           </div>
 
+        </section>
+
+        {/* Etapa visual 3: informações de pagamento via Pix */}
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-1">
           {/* Card de Informações Pix e Instruções (5 colunas) */}
-          <div className="lg:col-span-5 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5 sm:p-6 space-y-4 shadow-lg shadow-black/30 flex flex-col justify-between">
+          <div className="rounded-2xl bg-zinc-900/60 p-5 sm:p-6 space-y-4 shadow-lg shadow-black/30 flex flex-col justify-between">
             <div className="space-y-3">
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
                 <span>💰</span>
